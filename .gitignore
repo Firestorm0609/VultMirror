@@ -1,0 +1,11 @@
+# Environment variables and secrets
+.env
+config.ini
+*.pem
+*.key
+
+# Python
+__pycache__/
+*.py[cod]
+venv/
+env/

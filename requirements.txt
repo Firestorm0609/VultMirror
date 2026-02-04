@@ -1,3 +1,5 @@
-telethon
-python-dotenv
-
+python-telegram-bot>=20.0
+telethon>=1.28.0
+cryptography>=41.0.0
+python-dotenv>=1.0.0
+aiosqlite>=0.19.0

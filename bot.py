@@ -59,6 +59,34 @@ USER_STATES = {
     'AWAITING_TARGET_CHAT': 'awaiting_target_chat',
 }
 
+# Help message constant
+HELP_MESSAGE = """📚 *VultMirror Help*
+
+🔮 *What is VultMirror?*
+A bot that monitors Telegram channels for Solana contract addresses (CAs) and forwards them to your private chat instantly.
+
+📋 *Commands:*
+• `/start` - Main menu
+• `/help` - This help message
+• `/routes` - View your routes
+• `/stats` - Your statistics
+• `/pricing` - Subscription plans
+• `/search` - Search CA history
+• `/export` - Export CA history
+
+🚀 *Quick Start:*
+1️⃣ Click 'Setup Authentication'
+2️⃣ Enter your Telegram API credentials
+3️⃣ Add a route (source → target)
+4️⃣ CAs will auto-forward! 🎉
+
+💡 *Tips:*
+• Use @userinfobot to get chat IDs
+• You must be a member of source channels
+• Target can be any chat you can message
+
+❓ Need more help? Contact the admin!"""
+
 
 class MultiUserCABot:
     """Main bot orchestrator for multi-user CA monitoring"""
@@ -261,37 +289,10 @@ class MultiUserCABot:
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
-        message = "📚 *VultMirror Help*\n\n"
-        message += "🔮 *What is VultMirror?*\n"
-        message += "A bot that monitors Telegram channels for Solana contract addresses (CAs) "
-        message += "and forwards them to your private chat instantly.\n\n"
-        
-        message += "📋 *Commands:*\n"
-        message += "• `/start` - Main menu\n"
-        message += "• `/help` - This help message\n"
-        message += "• `/routes` - View your routes\n"
-        message += "• `/stats` - Your statistics\n"
-        message += "• `/pricing` - Subscription plans\n"
-        message += "• `/search` - Search CA history\n"
-        message += "• `/export` - Export CA history\n\n"
-        
-        message += "🚀 *Quick Start:*\n"
-        message += "1️⃣ Click 'Setup Authentication'\n"
-        message += "2️⃣ Enter your Telegram API credentials\n"
-        message += "3️⃣ Add a route (source → target)\n"
-        message += "4️⃣ CAs will auto-forward! 🎉\n\n"
-        
-        message += "💡 *Tips:*\n"
-        message += "• Use @userinfobot to get chat IDs\n"
-        message += "• You must be a member of source channels\n"
-        message += "• Target can be any chat you can message\n\n"
-        
-        message += "❓ Need more help? Contact the admin!"
-        
         keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
         
         await update.message.reply_text(
-            message,
+            HELP_MESSAGE,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
@@ -619,41 +620,14 @@ class MultiUserCABot:
             await query.answer(f"{status_text} route!")
             await self.view_routes(query, context)
         else:
-            await query.answer("❌ Error toggling route")
+            await query.answer("❌ Route not found or failed to update")
     
     async def show_help_callback(self, query, context):
         """Handle help callback"""
-        message = "📚 *VultMirror Help*\n\n"
-        message += "🔮 *What is VultMirror?*\n"
-        message += "A bot that monitors Telegram channels for Solana contract addresses (CAs) "
-        message += "and forwards them to your private chat instantly.\n\n"
-        
-        message += "📋 *Commands:*\n"
-        message += "• `/start` - Main menu\n"
-        message += "• `/help` - This help message\n"
-        message += "• `/routes` - View your routes\n"
-        message += "• `/stats` - Your statistics\n"
-        message += "• `/pricing` - Subscription plans\n"
-        message += "• `/search` - Search CA history\n"
-        message += "• `/export` - Export CA history\n\n"
-        
-        message += "🚀 *Quick Start:*\n"
-        message += "1️⃣ Click 'Setup Authentication'\n"
-        message += "2️⃣ Enter your Telegram API credentials\n"
-        message += "3️⃣ Add a route (source → target)\n"
-        message += "4️⃣ CAs will auto-forward! 🎉\n\n"
-        
-        message += "💡 *Tips:*\n"
-        message += "• Use @userinfobot to get chat IDs\n"
-        message += "• You must be a member of source channels\n"
-        message += "• Target can be any chat you can message\n\n"
-        
-        message += "❓ Need more help? Contact the admin!"
-        
         keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
         
         await query.edit_message_text(
-            message,
+            HELP_MESSAGE,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
@@ -919,8 +893,8 @@ class MultiUserCABot:
     
     async def run(self):
         """Run the bot"""
-        print("🚀 Starting Multi-User CA Mirror Bot...")
-        print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        logger.info("🚀 Starting Multi-User CA Mirror Bot...")
+        logger.info(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         
         # Load existing user sessions
         await self.session_manager.load_all_sessions()
@@ -961,7 +935,7 @@ class MultiUserCABot:
         try:
             await asyncio.Event().wait()
         except KeyboardInterrupt:
-            print("\n\n👋 Shutting down...")
+            logger.info("\n\n👋 Shutting down...")
             await self.session_manager.disconnect_all()
             await self.bot_app.stop()
 
@@ -970,17 +944,17 @@ async def main():
     """Main entry point"""
     # Validate configuration
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN not found in .env!")
-        print("\n📝 Steps to create a bot:")
-        print("1. Message @BotFather on Telegram")
-        print("2. Send /newbot")
-        print("3. Follow instructions")
-        print("4. Add BOT_TOKEN=your_token to .env")
+        logger.error("❌ BOT_TOKEN not found in .env!")
+        logger.info("\n📝 Steps to create a bot:")
+        logger.info("1. Message @BotFather on Telegram")
+        logger.info("2. Send /newbot")
+        logger.info("3. Follow instructions")
+        logger.info("4. Add BOT_TOKEN=your_token to .env")
         return
     
     if not ADMIN_USER_ID:
-        print("❌ ADMIN_USER_ID not found in .env!")
-        print("Add your Telegram user ID to .env")
+        logger.error("❌ ADMIN_USER_ID not found in .env!")
+        logger.info("Add your Telegram user ID to .env")
         return
     
     # Create and run bot
@@ -989,11 +963,9 @@ async def main():
     try:
         await bot.run()
     except KeyboardInterrupt:
-        print("\n\n👋 Bot stopped by user")
+        logger.info("\n\n👋 Bot stopped by user")
     except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"❌ Error: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

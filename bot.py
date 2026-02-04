@@ -13,6 +13,7 @@ import asyncio
 from datetime import datetime
 from typing import Dict, Set, Optional
 from dotenv import load_dotenv
+from io import BytesIO
 
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
@@ -30,6 +31,8 @@ from telethon.tl.types import User, Chat, Channel
 from database import Database
 from session_manager import SessionManager
 from payment_handler import PaymentHandler
+from logger import logger
+from validators import validate_api_id, validate_api_hash, validate_phone, validate_chat_id
 
 load_dotenv()
 
@@ -55,6 +58,34 @@ USER_STATES = {
     'AWAITING_SOURCE_CHAT': 'awaiting_source_chat',
     'AWAITING_TARGET_CHAT': 'awaiting_target_chat',
 }
+
+# Help message constant
+HELP_MESSAGE = """📚 *VultMirror Help*
+
+🔮 *What is VultMirror?*
+A bot that monitors Telegram channels for Solana contract addresses (CAs) and forwards them to your private chat instantly.
+
+📋 *Commands:*
+• `/start` - Main menu
+• `/help` - This help message
+• `/routes` - View your routes
+• `/stats` - Your statistics
+• `/pricing` - Subscription plans
+• `/search` - Search CA history
+• `/export` - Export CA history
+
+🚀 *Quick Start:*
+1️⃣ Click 'Setup Authentication'
+2️⃣ Enter your Telegram API credentials
+3️⃣ Add a route (source → target)
+4️⃣ CAs will auto-forward! 🎉
+
+💡 *Tips:*
+• Use @userinfobot to get chat IDs
+• You must be a member of source channels
+• Target can be any chat you can message
+
+❓ Need more help? Contact the admin!"""
 
 
 class MultiUserCABot:
@@ -193,18 +224,11 @@ class MultiUserCABot:
                 # Increment daily count
                 self.db.increment_daily_ca_count(user_id)
                 
-                print(f"\n✅ CA FORWARDED!")
-                print(f"   👤 User: {user_id}")
-                print(f"   📥 Source: {matching_route['source_name']}")
-                print(f"   💎 CA: {ca}")
-                print(f"   📤 Target: {matching_route['target_name']}")
-                print(f"   👤 Sender: {sender_name}")
-                print("=" * 60)
+                # Log success
+                logger.info(f"CA forwarded for user {user_id}: {ca[:20]}... to {matching_route['target_name']}")
         
         except Exception as e:
-            print(f"❌ Error handling message for user {user_id}: {e}")
-            import traceback
-            traceback.print_exc()
+            logger.error(f"Error handling message for user {user_id}: {e}", exc_info=True)
     
     def _get_entity_name(self, entity) -> str:
         """Get readable name from Telegram entity"""
@@ -248,8 +272,11 @@ class MultiUserCABot:
             keyboard.append([InlineKeyboardButton("➕ Add Route", callback_data="add_route")])
             keyboard.append([InlineKeyboardButton("📋 My Routes", callback_data="view_routes")])
         
-        keyboard.append([InlineKeyboardButton("💰 Pricing & Subscribe", callback_data="pricing")])
-        keyboard.append([InlineKeyboardButton("📊 My Stats", callback_data="my_stats")])
+        keyboard.append([
+            InlineKeyboardButton("💰 Pricing", callback_data="pricing"),
+            InlineKeyboardButton("📊 Stats", callback_data="my_stats")
+        ])
+        keyboard.append([InlineKeyboardButton("❓ Help", callback_data="show_help")])
         
         if user_id == ADMIN_USER_ID:
             keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin_panel")])
@@ -258,6 +285,128 @@ class MultiUserCABot:
             message,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
+        )
+    
+    async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /help command"""
+        keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
+        
+        await update.message.reply_text(
+            HELP_MESSAGE,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    
+    async def routes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /routes command"""
+        user_id = update.effective_user.id
+        routes = self.db.get_user_routes(user_id)
+        
+        if not routes:
+            message = "📋 *Your Routes*\n\n"
+            message += "You have no active routes.\n"
+            message += "Use /start to add your first route!"
+        else:
+            message = f"📋 *Your Routes* ({len(routes)} active)\n\n"
+            for i, route in enumerate(routes, 1):
+                status = "✅" if route['is_active'] else "⏸️"
+                message += f"{i}. {status} {route['source_name']}\n"
+                message += f"   └ To: {route['target_name']}\n\n"
+        
+        keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
+        
+        await update.message.reply_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    
+    async def stats_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /stats command"""
+        user_id = update.effective_user.id
+        stats = self.db.get_user_stats(user_id)
+        
+        message = "📊 *Your Statistics*\n\n"
+        message += f"💎 CAs Today: {stats['cas_today']}/{stats['daily_limit']}\n"
+        message += f"📅 CAs This Month: {stats['cas_this_month']}\n"
+        message += f"🏆 Total CAs: {stats['total_cas_all_time']}\n"
+        message += f"📋 Active Routes: {stats['active_routes']}\n"
+        
+        keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
+        
+        await update.message.reply_text(
+            message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    
+    async def pricing_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /pricing command"""
+        await self.show_pricing(update.message, context)
+    
+    async def search_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Search CA history"""
+        user_id = update.effective_user.id
+        
+        if not context.args:
+            await update.message.reply_text(
+                "🔍 *Search CA History*\n\n"
+                "Usage: `/search <query>`\n\n"
+                "Examples:\n"
+                "• `/search pump` - Find CAs containing 'pump'\n"
+                "• `/search 7xK` - Find CAs starting with '7xK'\n",
+                parse_mode='Markdown'
+            )
+            return
+        
+        query = ' '.join(context.args)
+        results = self.db.search_cas(user_id, query, limit=10)
+        
+        if not results:
+            await update.message.reply_text(f"No CAs found matching '{query}'")
+            return
+        
+        message = f"🔍 *Search Results for '{query}'*\n\n"
+        for i, ca in enumerate(results, 1):
+            message += f"{i}. `{ca['ca_address']}`\n"
+            message += f"   📅 {ca['forwarded_at'][:16]}\n"
+            if ca.get('source_name'):
+                message += f"   📥 {ca['source_name']}\n"
+            message += "\n"
+        
+        await update.message.reply_text(message, parse_mode='Markdown')
+    
+    async def export_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Export CA history as text file"""
+        user_id = update.effective_user.id
+        
+        # Get all CAs
+        cas = self.db.get_user_cas(user_id, limit=1000)
+        
+        if not cas:
+            await update.message.reply_text("No CA history to export.")
+            return
+        
+        # Create export text
+        export_text = "VultMirror CA Export\n"
+        export_text += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+        export_text += "=" * 50 + "\n\n"
+        
+        for ca in cas:
+            export_text += f"CA: {ca['ca_address']}\n"
+            export_text += f"Date: {ca['forwarded_at']}\n"
+            export_text += f"Sender: {ca.get('sender_name', 'Unknown')}\n"
+            if ca.get('source_name'):
+                export_text += f"Source: {ca['source_name']}\n"
+            export_text += "-" * 30 + "\n"
+        
+        # Send as file
+        file = BytesIO(export_text.encode())
+        file.name = f"vultmirror_export_{datetime.now().strftime('%Y%m%d')}.txt"
+        
+        await update.message.reply_document(
+            document=file,
+            caption="📁 Your CA history export"
         )
     
     async def show_main_menu(self, query, context):
@@ -287,8 +436,11 @@ class MultiUserCABot:
             keyboard.append([InlineKeyboardButton("➕ Add Route", callback_data="add_route")])
             keyboard.append([InlineKeyboardButton("📋 My Routes", callback_data="view_routes")])
         
-        keyboard.append([InlineKeyboardButton("💰 Pricing & Subscribe", callback_data="pricing")])
-        keyboard.append([InlineKeyboardButton("📊 My Stats", callback_data="my_stats")])
+        keyboard.append([
+            InlineKeyboardButton("💰 Pricing", callback_data="pricing"),
+            InlineKeyboardButton("📊 Stats", callback_data="my_stats")
+        ])
+        keyboard.append([InlineKeyboardButton("❓ Help", callback_data="show_help")])
         
         if user_id == ADMIN_USER_ID:
             keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin_panel")])
@@ -324,6 +476,11 @@ class MultiUserCABot:
                 await query.edit_message_text("❌ Admin access only!")
         elif data == "back_to_menu":
             await self.show_main_menu(query, context)
+        elif data == "show_help":
+            await self.show_help_callback(query, context)
+        elif data.startswith("toggle_route_"):
+            route_id = int(data.split("_")[2])
+            await self.toggle_route(query, context, route_id)
         elif data.startswith("delete_route_"):
             route_id = int(data.split("_")[2])
             await self.delete_route(query, context, route_id)
@@ -426,21 +583,51 @@ class MultiUserCABot:
         
         keyboard = []
         for i, route in enumerate(routes, 1):
-            message += f"*{i}. {route['source_name']}* → {route['target_name']}\n"
+            status = "✅" if route['is_active'] else "⏸️"
+            message += f"{status} *{i}. {route['source_name']}* → {route['target_name']}\n"
             message += f"   📊 Forwarded: {route['total_forwarded']} CAs\n"
-            message += f"   🆔 Route ID: {route['route_id']}\n\n"
+            message += f"   🆔 Route ID: {route['route_id']}\n"
             
+            # Add pause/resume and delete buttons
             keyboard.append([
                 InlineKeyboardButton(
-                    f"🗑️ Delete Route {i}",
+                    "⏸️ Pause" if route['is_active'] else "▶️ Resume",
+                    callback_data=f"toggle_route_{route['route_id']}"
+                ),
+                InlineKeyboardButton(
+                    f"🗑️ Delete",
                     callback_data=f"delete_route_{route['route_id']}"
                 )
             ])
+            message += "\n"
         
         keyboard.append([InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")])
         
         await query.edit_message_text(
             message,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode='Markdown'
+        )
+    
+    async def toggle_route(self, query, context, route_id: int):
+        """Toggle route active/paused status"""
+        user_id = query.from_user.id
+        
+        success, new_status = self.db.toggle_route_status(user_id, route_id)
+        
+        if success:
+            status_text = "▶️ Resumed" if new_status else "⏸️ Paused"
+            await query.answer(f"{status_text} route!")
+            await self.view_routes(query, context)
+        else:
+            await query.answer("❌ Route not found or failed to update")
+    
+    async def show_help_callback(self, query, context):
+        """Handle help callback"""
+        keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
+        
+        await query.edit_message_text(
+            HELP_MESSAGE,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
@@ -688,12 +875,26 @@ class MultiUserCABot:
         """Subscribe to Alpha tier"""
         await self.payment_handler.create_invoice(update, context, 'alpha')
     
+    async def error_handler(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle errors globally"""
+        logger.error(f"Exception while handling update: {context.error}", exc_info=context.error)
+        
+        # Try to notify user
+        try:
+            if update and update.effective_message:
+                await update.effective_message.reply_text(
+                    "❌ An error occurred. Please try again.\n\n"
+                    "If this persists, contact support."
+                )
+        except Exception:
+            pass
+    
     # ==================== MAIN RUN LOOP ====================
     
     async def run(self):
         """Run the bot"""
-        print("🚀 Starting Multi-User CA Mirror Bot...")
-        print(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+        logger.info("🚀 Starting Multi-User CA Mirror Bot...")
+        logger.info(f"⏰ {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
         
         # Load existing user sessions
         await self.session_manager.load_all_sessions()
@@ -703,6 +904,12 @@ class MultiUserCABot:
         
         # Add handlers
         self.bot_app.add_handler(CommandHandler("start", self.start_command))
+        self.bot_app.add_handler(CommandHandler("help", self.help_command))
+        self.bot_app.add_handler(CommandHandler("routes", self.routes_command))
+        self.bot_app.add_handler(CommandHandler("stats", self.stats_command))
+        self.bot_app.add_handler(CommandHandler("pricing", self.pricing_command))
+        self.bot_app.add_handler(CommandHandler("search", self.search_command))
+        self.bot_app.add_handler(CommandHandler("export", self.export_command))
         self.bot_app.add_handler(CommandHandler("subscribe_starter", self.subscribe_starter))
         self.bot_app.add_handler(CommandHandler("subscribe_pro", self.subscribe_pro))
         self.bot_app.add_handler(CommandHandler("subscribe_alpha", self.subscribe_alpha))
@@ -711,11 +918,13 @@ class MultiUserCABot:
         self.bot_app.add_handler(PreCheckoutQueryHandler(self.handle_precheckout))
         self.bot_app.add_handler(MessageHandler(filters.SUCCESSFUL_PAYMENT, self.handle_successful_payment))
         
-        print("✅ Telegram bot interface ready!")
+        # Add error handler
+        self.bot_app.add_error_handler(self.error_handler)
+        
+        logger.info("✅ Telegram bot interface ready!")
         bot_me = await self.bot_app.bot.get_me()
-        print(f"🤖 Bot username: @{bot_me.username}")
-        print(f"\n💬 Send /start to @{bot_me.username} to begin!\n")
-        print("=" * 60)
+        logger.info(f"🤖 Bot username: @{bot_me.username}")
+        logger.info(f"\n💬 Send /start to @{bot_me.username} to begin!\n")
         
         # Initialize and run
         await self.bot_app.initialize()
@@ -726,7 +935,7 @@ class MultiUserCABot:
         try:
             await asyncio.Event().wait()
         except KeyboardInterrupt:
-            print("\n\n👋 Shutting down...")
+            logger.info("\n\n👋 Shutting down...")
             await self.session_manager.disconnect_all()
             await self.bot_app.stop()
 
@@ -735,17 +944,17 @@ async def main():
     """Main entry point"""
     # Validate configuration
     if not BOT_TOKEN:
-        print("❌ BOT_TOKEN not found in .env!")
-        print("\n📝 Steps to create a bot:")
-        print("1. Message @BotFather on Telegram")
-        print("2. Send /newbot")
-        print("3. Follow instructions")
-        print("4. Add BOT_TOKEN=your_token to .env")
+        logger.error("❌ BOT_TOKEN not found in .env!")
+        logger.info("\n📝 Steps to create a bot:")
+        logger.info("1. Message @BotFather on Telegram")
+        logger.info("2. Send /newbot")
+        logger.info("3. Follow instructions")
+        logger.info("4. Add BOT_TOKEN=your_token to .env")
         return
     
     if not ADMIN_USER_ID:
-        print("❌ ADMIN_USER_ID not found in .env!")
-        print("Add your Telegram user ID to .env")
+        logger.error("❌ ADMIN_USER_ID not found in .env!")
+        logger.info("Add your Telegram user ID to .env")
         return
     
     # Create and run bot
@@ -754,11 +963,9 @@ async def main():
     try:
         await bot.run()
     except KeyboardInterrupt:
-        print("\n\n👋 Bot stopped by user")
+        logger.info("\n\n👋 Bot stopped by user")
     except Exception as e:
-        print(f"❌ Error: {e}")
-        import traceback
-        traceback.print_exc()
+        logger.error(f"❌ Error: {e}", exc_info=True)
 
 
 if __name__ == "__main__":

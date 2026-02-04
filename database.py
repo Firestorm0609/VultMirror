@@ -10,6 +10,7 @@ from datetime import datetime, timedelta
 from typing import Optional, Dict, List, Tuple
 from cryptography.fernet import Fernet
 import os
+from logger import logger
 
 class Database:
     def __init__(self, db_path: str = "bot_data_multiuser.db"):
@@ -38,7 +39,7 @@ class Database:
         conn = sqlite3.connect(self.db_path)
         conn.executescript(schema)
         conn.close()
-        print("✅ Database initialized")
+        logger.info("✅ Database initialized")
     
     def _encrypt(self, data: str) -> str:
         """Encrypt sensitive data"""
@@ -65,7 +66,7 @@ class Database:
             conn.close()
             return True
         except Exception as e:
-            print(f"❌ Error creating user: {e}")
+            logger.error(f"❌ Error creating user: {e}")
             return False
     
     def get_user(self, user_id: int) -> Optional[Dict]:
@@ -108,7 +109,7 @@ class Database:
             conn.close()
             return True
         except Exception as e:
-            print(f"❌ Error updating credentials: {e}")
+            logger.error(f"❌ Error updating credentials: {e}")
             return False
     
     def get_user_credentials(self, user_id: int) -> Optional[Tuple[str, str, str]]:
@@ -123,7 +124,7 @@ class Database:
             phone = self._decrypt(user['phone_encrypted'])
             return (api_id, api_hash, phone)
         except Exception as e:
-            print(f"❌ Error decrypting credentials: {e}")
+            logger.error(f"❌ Error decrypting credentials: {e}")
             return None
     
     def update_subscription(self, user_id: int, tier: str, duration_days: int = 30) -> bool:
@@ -156,7 +157,7 @@ class Database:
             conn.close()
             return True
         except Exception as e:
-            print(f"❌ Error updating subscription: {e}")
+            logger.error(f"❌ Error updating subscription: {e}")
             return False
     
     def check_subscription_active(self, user_id: int) -> bool:
@@ -262,7 +263,7 @@ class Database:
             conn.close()
             return route_id
         except Exception as e:
-            print(f"❌ Error adding route: {e}")
+            logger.error(f"❌ Error adding route: {e}")
             return None
     
     def get_user_routes(self, user_id: int) -> List[Dict]:
@@ -297,7 +298,7 @@ class Database:
             conn.close()
             return True
         except Exception as e:
-            print(f"❌ Error deleting route: {e}")
+            logger.error(f"❌ Error deleting route: {e}")
             return False
     
     def get_all_active_routes(self) -> List[Dict]:
@@ -355,7 +356,7 @@ class Database:
             conn.close()
             return True
         except Exception as e:
-            print(f"❌ Error logging CA: {e}")
+            logger.error(f"❌ Error logging CA: {e}")
             return False
     
     def get_user_cas(self, user_id: int, limit: int = 50) -> List[Dict]:
@@ -414,7 +415,7 @@ class Database:
             conn.close()
             return payment_id
         except Exception as e:
-            print(f"❌ Error creating payment: {e}")
+            logger.error(f"❌ Error creating payment: {e}")
             return None
     
     def complete_payment(self, payment_id: int) -> bool:
@@ -434,7 +435,7 @@ class Database:
             conn.close()
             return True
         except Exception as e:
-            print(f"❌ Error completing payment: {e}")
+            logger.error(f"❌ Error completing payment: {e}")
             return False
     
     # ==================== ANALYTICS ====================
@@ -555,4 +556,79 @@ class Database:
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]
+    
+    # ==================== NEW FEATURE METHODS ====================
+    
+    def search_cas(self, user_id: int, query: str, limit: int = 10) -> List[Dict]:
+        """Search CAs by address or source"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT fc.*, r.source_name 
+            FROM forwarded_cas fc
+            LEFT JOIN routes r ON fc.route_id = r.route_id
+            WHERE fc.user_id = ? AND (
+                fc.ca_address LIKE ? OR
+                fc.sender_name LIKE ? OR
+                fc.original_message LIKE ?
+            )
+            ORDER BY fc.forwarded_at DESC
+            LIMIT ?
+        """, (user_id, f"%{query}%", f"%{query}%", f"%{query}%", limit))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    
+    def toggle_route_status(self, user_id: int, route_id: int) -> Tuple[bool, bool]:
+        """Toggle route is_active status. Returns (success, new_status)"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get current status
+            cursor.execute(
+                "SELECT is_active FROM routes WHERE route_id = ? AND user_id = ?",
+                (route_id, user_id)
+            )
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False, False
+            
+            new_status = not row[0]
+            
+            cursor.execute(
+                "UPDATE routes SET is_active = ? WHERE route_id = ? AND user_id = ?",
+                (new_status, route_id, user_id)
+            )
+            
+            conn.commit()
+            conn.close()
+            return True, new_status
+        except Exception as e:
+            logger.error(f"Error toggling route: {e}")
+            return False, False
+    
+    def get_user_cas(self, user_id: int, limit: int = 1000) -> List[Dict]:
+        """Get all CAs for a user"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT fc.*, r.source_name 
+            FROM forwarded_cas fc
+            LEFT JOIN routes r ON fc.route_id = r.route_id
+            WHERE fc.user_id = ?
+            ORDER BY fc.forwarded_at DESC
+            LIMIT ?
+        """, (user_id, limit))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
 

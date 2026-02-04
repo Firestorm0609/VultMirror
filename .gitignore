@@ -1,11 +1,43 @@
-# Environment variables and secrets
+# Environment
 .env
+.env.local
 config.ini
+
+# Encryption keys
+.encryption_key
 *.pem
 *.key
+
+# Databases
+*.db
+*.sqlite
+*.sqlite3
+
+# Telegram sessions
+*.session
+sessions/
+
+# User data
+users.json
+routes.json
 
 # Python
 __pycache__/
 *.py[cod]
+*$py.class
+*.so
+.Python
 venv/
+.venv/
+ENV/
 env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# Logs
+*.log
+logs/

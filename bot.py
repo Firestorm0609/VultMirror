@@ -90,6 +90,10 @@ A bot that monitors Telegram channels for Solana contract addresses (CAs) and fo
 
 ❓ Need more help? Contact the admin!"""
 
+# Subscription tier configuration
+TIER_EMOJI = {'free': '🆓', 'starter': '⭐', 'pro': '💎', 'alpha': '🔥'}
+VALID_TIERS = ['starter', 'pro', 'alpha']
+
 
 class MultiUserCABot:
     """Main bot orchestrator for multi-user CA monitoring"""
@@ -445,7 +449,7 @@ class MultiUserCABot:
         
         msg += "*Preview:*\n"
         if current_format == 'rich':
-            msg += "```\n💎 New CA Detected!\n\n7xKXtg2CW87d97TXJ...\n\n📥 From: Alpha Calls\n⏰ 15:42:33\n```\n"
+            msg += "```\n💎 New CA Detected!\n\n7xKXtg2CW87d97TXJ...\n\n📥 From: Alpha Calls\n👤 Posted by: @trader123\n⏰ 15:42:33\n```\n"
         else:
             msg += "```\n7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU\n```\n"
         
@@ -969,7 +973,7 @@ class MultiUserCABot:
             tier = context.args[1].lower()
             days = int(context.args[2]) if len(context.args) > 2 else 30
             
-            if tier not in ['starter', 'pro', 'alpha']:
+            if tier not in VALID_TIERS:
                 await update.message.reply_text("❌ Invalid tier. Use: `starter`, `pro`, or `alpha`", parse_mode='Markdown')
                 return
             
@@ -983,13 +987,11 @@ class MultiUserCABot:
             success = self.db.update_subscription(target_user_id, tier, days)
             
             if success:
-                tier_emoji = {'starter': '⭐', 'pro': '💎', 'alpha': '🔥'}
-                
                 # Notify admin
                 await update.message.reply_text(
                     f"✅ *Subscription Granted!*\n\n"
                     f"👤 User: `{target_user_id}`\n"
-                    f"🎫 Tier: {tier_emoji.get(tier, '')} {tier.title()}\n"
+                    f"🎫 Tier: {TIER_EMOJI.get(tier, '')} {tier.title()}\n"
                     f"📅 Duration: {days} days",
                     parse_mode='Markdown'
                 )
@@ -999,7 +1001,7 @@ class MultiUserCABot:
                     await context.bot.send_message(
                         chat_id=target_user_id,
                         text=f"🎉 *Congratulations!*\n\n"
-                             f"You've been granted {tier_emoji.get(tier, '')} *{tier.title()}* access for {days} days!\n\n"
+                             f"You've been granted {TIER_EMOJI.get(tier, '')} *{tier.title()}* access for {days} days!\n\n"
                              f"Send /start to see your new features.",
                         parse_mode='Markdown'
                     )
@@ -1087,15 +1089,13 @@ class MultiUserCABot:
             stats = self.db.get_user_stats(target_user_id)
             routes = self.db.get_user_routes(target_user_id)
             
-            tier_emoji = {'free': '🆓', 'starter': '⭐', 'pro': '💎', 'alpha': '🔥'}
-            
             message = f"👤 *User Info*\n\n"
             message += f"🆔 ID: `{target_user_id}`\n"
             message += f"👤 Username: @{target_user.get('username', 'N/A')}\n"
             message += f"📛 Name: {target_user.get('first_name', 'N/A')}\n\n"
             
             message += f"🎫 *Subscription:*\n"
-            message += f"├ Tier: {tier_emoji.get(stats['subscription_tier'], '')} {stats['subscription_tier'].title()}\n"
+            message += f"├ Tier: {TIER_EMOJI.get(stats['subscription_tier'], '')} {stats['subscription_tier'].title()}\n"
             if stats.get('subscription_expires'):
                 message += f"└ Expires: {stats['subscription_expires'][:10]}\n\n"
             else:

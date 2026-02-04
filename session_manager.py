@@ -63,6 +63,19 @@ class SessionManager:
             traceback.print_exc()
             return (False, f"Error: {str(e)}")
     
+    def _clean_verification_code(self, code: str) -> str:
+        """
+        Clean and reconstruct verification code from obfuscated input.
+        Users enter codes with spaces/dashes to avoid Telegram's sharing detection.
+        Examples:
+            "1 2 3 4 5" -> "12345"
+            "1-2-3-4-5" -> "12345"
+            "12 34 5" -> "12345"
+        """
+        # Remove spaces, dashes, dots, and any other separators
+        cleaned = ''.join(char for char in code if char.isdigit())
+        return cleaned
+    
     async def verify_code(self, user_id: int, api_id: str, api_hash: str,
                          phone: str, code: str) -> tuple[bool, str]:
         """
@@ -74,6 +87,12 @@ class SessionManager:
             if user_id not in self.pending_auth:
                 return (False, "Session expired. Please start authentication again with /start")
             
+            # Clean the obfuscated code
+            clean_code = self._clean_verification_code(code)
+            
+            if not clean_code:
+                return (False, "Invalid code format. Please enter a verification code containing at least one digit.")
+            
             pending = self.pending_auth[user_id]
             phone_code_hash = pending['phone_code_hash']
             client = pending['client']
@@ -84,7 +103,7 @@ class SessionManager:
             
             # Sign in with code AND phone_code_hash
             try:
-                await client.sign_in(phone, code, phone_code_hash=phone_code_hash)
+                await client.sign_in(phone, clean_code, phone_code_hash=phone_code_hash)
             except SessionPasswordNeededError:
                 return (False, "2FA is enabled. Please disable it temporarily and try again.")
             except PhoneCodeInvalidError:

@@ -91,7 +91,7 @@ class SessionManager:
             clean_code = self._clean_verification_code(code)
             
             if not clean_code:
-                return (False, "Invalid code format. Please enter the digits with spaces between them.")
+                return (False, "Invalid code format. Please enter a verification code containing at least one digit.")
             
             pending = self.pending_auth[user_id]
             phone_code_hash = pending['phone_code_hash']

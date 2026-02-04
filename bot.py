@@ -49,6 +49,9 @@ IGNORE_ADDRESSES = {
 }
 IGNORE_PREFIXES = ['bafk', 'Qm']
 
+# Minimum length for verification codes
+MIN_VERIFICATION_CODE_LENGTH = 5
+
 # User states for conversation flow
 USER_STATES = {
     'AWAITING_API_ID': 'awaiting_api_id',
@@ -748,9 +751,10 @@ class MultiUserCABot:
         elif state == USER_STATES['AWAITING_CODE']:
             code = text.strip()
             
-            # Validate format - should contain digits (with optional separators)
+            # Validate format - should contain enough digits
+            # Use the same cleaning logic as session_manager to stay consistent
             digits_only = ''.join(c for c in code if c.isdigit())
-            if len(digits_only) < 5:
+            if len(digits_only) < MIN_VERIFICATION_CODE_LENGTH:
                 await update.message.reply_text(
                     "❌ Code seems too short.\n\n"
                     "Remember to enter with spaces: `1 2 3 4 5`",

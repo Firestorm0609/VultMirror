@@ -733,7 +733,13 @@ class MultiUserCABot:
                 self.user_states[user_id]['state'] = USER_STATES['AWAITING_CODE']
                 await update.message.reply_text(
                     f"✅ {message}\n\n"
-                    "📲 Check Telegram! Enter the verification code:"
+                    "📲 Check Telegram for your verification code!\n\n"
+                    "⚠️ *IMPORTANT:* To avoid Telegram blocking the login:\n"
+                    "Enter the code with *spaces between each digit*\n\n"
+                    "Example: If your code is `12345`, send:\n"
+                    "`1 2 3 4 5`\n\n"
+                    "This prevents Telegram from detecting it as code sharing.",
+                    parse_mode='Markdown'
                 )
             else:
                 await update.message.reply_text(f"❌ {message}\n\nTry again from /start")
@@ -741,6 +747,16 @@ class MultiUserCABot:
         
         elif state == USER_STATES['AWAITING_CODE']:
             code = text.strip()
+            
+            # Validate format - should contain digits (with optional separators)
+            digits_only = ''.join(c for c in code if c.isdigit())
+            if len(digits_only) < 5:
+                await update.message.reply_text(
+                    "❌ Code seems too short.\n\n"
+                    "Remember to enter with spaces: `1 2 3 4 5`",
+                    parse_mode='Markdown'
+                )
+                return
             
             success, message = await self.session_manager.verify_code(
                 user_id, data['api_id'], data['api_hash'], data['phone'], code

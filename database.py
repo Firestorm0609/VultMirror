@@ -555,4 +555,79 @@ class Database:
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]
+    
+    # ==================== NEW FEATURE METHODS ====================
+    
+    def search_cas(self, user_id: int, query: str, limit: int = 10) -> List[Dict]:
+        """Search CAs by address or source"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT fc.*, r.source_name 
+            FROM forwarded_cas fc
+            LEFT JOIN routes r ON fc.route_id = r.route_id
+            WHERE fc.user_id = ? AND (
+                fc.ca_address LIKE ? OR
+                fc.sender_name LIKE ? OR
+                fc.original_message LIKE ?
+            )
+            ORDER BY fc.forwarded_at DESC
+            LIMIT ?
+        """, (user_id, f"%{query}%", f"%{query}%", f"%{query}%", limit))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    
+    def toggle_route_status(self, user_id: int, route_id: int) -> Tuple[bool, bool]:
+        """Toggle route is_active status. Returns (success, new_status)"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get current status
+            cursor.execute(
+                "SELECT is_active FROM routes WHERE route_id = ? AND user_id = ?",
+                (route_id, user_id)
+            )
+            row = cursor.fetchone()
+            if not row:
+                conn.close()
+                return False, False
+            
+            new_status = not row[0]
+            
+            cursor.execute(
+                "UPDATE routes SET is_active = ? WHERE route_id = ? AND user_id = ?",
+                (new_status, route_id, user_id)
+            )
+            
+            conn.commit()
+            conn.close()
+            return True, new_status
+        except Exception as e:
+            print(f"Error toggling route: {e}")
+            return False, False
+    
+    def get_user_cas(self, user_id: int, limit: int = 1000) -> List[Dict]:
+        """Get all CAs for a user"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT fc.*, r.source_name 
+            FROM forwarded_cas fc
+            LEFT JOIN routes r ON fc.route_id = r.route_id
+            WHERE fc.user_id = ?
+            ORDER BY fc.forwarded_at DESC
+            LIMIT ?
+        """, (user_id, limit))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+
 

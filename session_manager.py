@@ -113,8 +113,7 @@ class SessionManager:
             print(f"❌ Error verifying code for user {user_id}: {e}")
             traceback.print_exc()
             # Clean up pending auth on error
-            if user_id in self.pending_auth:
-                del self.pending_auth[user_id]
+            await self.cleanup_pending_auth(user_id)
             return (False, f"Error: {str(e)}")
     
     async def setup_monitoring(self, user_id: int, client: TelegramClient):
@@ -275,13 +274,15 @@ class SessionManager:
     async def cleanup_pending_auth(self, user_id: int):
         """Clean up pending authentication for a user"""
         if user_id in self.pending_auth:
+            client = None
             try:
                 client = self.pending_auth[user_id].get('client')
                 if client and client.is_connected():
                     await client.disconnect()
             except Exception:
                 pass
-            del self.pending_auth[user_id]
+            finally:
+                del self.pending_auth[user_id]
     
     async def disconnect_user(self, user_id: int):
         """Disconnect a user's client"""

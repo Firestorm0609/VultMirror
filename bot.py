@@ -210,8 +210,21 @@ class MultiUserCABot:
             client = self.session_manager.get_user_client(user_id)
             
             if client:
-                # Send just the CA
-                await client.send_message(target_chat_id, ca)
+                # Get user's format preference
+                ca_format = self.db.get_user_ca_format(user_id)
+                
+                if ca_format == 'minimal':
+                    # Just send the raw CA
+                    await client.send_message(target_chat_id, ca)
+                else:
+                    # Rich format with info
+                    ca_message = f"💎 *New CA Detected!*\n\n"
+                    ca_message += f"`{ca}`\n\n"
+                    ca_message += f"📥 From: {matching_route['source_name']}\n"
+                    ca_message += f"👤 Posted by: {sender_name}\n"
+                    ca_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                    
+                    await client.send_message(target_chat_id, ca_message, parse_mode='md')
                 
                 # Log the forwarded CA
                 self.db.log_forwarded_ca(
@@ -412,6 +425,52 @@ class MultiUserCABot:
             caption="📁 Your CA history export"
         )
     
+    async def settings_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /settings command"""
+        await self.show_settings(update.message, update.effective_user.id)
+    
+    async def show_settings(self, message_or_query, user_id: int, edit: bool = False):
+        """Show settings menu"""
+        current_format = self.db.get_user_ca_format(user_id)
+        
+        rich_check = "✓" if current_format == 'rich' else ""
+        minimal_check = "✓" if current_format == 'minimal' else ""
+        
+        msg = "⚙️ *Settings*\n\n"
+        msg += "📋 *CA Message Format:*\n"
+        if current_format == 'rich':
+            msg += "Current: 💎 Rich (with source info & links)\n\n"
+        else:
+            msg += "Current: 📋 Minimal (just the CA)\n\n"
+        
+        msg += "*Preview:*\n"
+        if current_format == 'rich':
+            msg += "```\n💎 New CA Detected!\n\n7xKXtg2CW87d97TXJ...\n\n📥 From: Alpha Calls\n⏰ 15:42:33\n```\n"
+        else:
+            msg += "```\n7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU\n```\n"
+        
+        keyboard = [
+            [
+                InlineKeyboardButton(f"💎 Rich {rich_check}", callback_data="set_format_rich"),
+                InlineKeyboardButton(f"📋 Minimal {minimal_check}", callback_data="set_format_minimal")
+            ],
+            [InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]
+        ]
+        
+        if edit and hasattr(message_or_query, 'edit_message_text'):
+            await message_or_query.edit_message_text(
+                msg,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        else:
+            target = message_or_query if hasattr(message_or_query, 'reply_text') else message_or_query.message
+            await target.reply_text(
+                msg,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+    
     async def show_main_menu(self, query, context):
         """Show main menu in response to callback"""
         user_id = query.from_user.id
@@ -443,7 +502,10 @@ class MultiUserCABot:
             InlineKeyboardButton("💰 Pricing", callback_data="pricing"),
             InlineKeyboardButton("📊 Stats", callback_data="my_stats")
         ])
-        keyboard.append([InlineKeyboardButton("❓ Help", callback_data="show_help")])
+        keyboard.append([
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
+            InlineKeyboardButton("❓ Help", callback_data="show_help")
+        ])
         
         if user_id == ADMIN_USER_ID:
             keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin_panel")])
@@ -481,6 +543,16 @@ class MultiUserCABot:
             await self.show_main_menu(query, context)
         elif data == "show_help":
             await self.show_help_callback(query, context)
+        elif data == "settings":
+            await self.show_settings(query, user_id, edit=True)
+        elif data == "set_format_rich":
+            self.db.set_user_ca_format(user_id, 'rich')
+            await query.answer("✅ Format set to Rich!")
+            await self.show_settings(query, user_id, edit=True)
+        elif data == "set_format_minimal":
+            self.db.set_user_ca_format(user_id, 'minimal')
+            await query.answer("✅ Format set to Minimal!")
+            await self.show_settings(query, user_id, edit=True)
         elif data.startswith("toggle_route_"):
             route_id = int(data.split("_")[2])
             await self.toggle_route(query, context, route_id)
@@ -871,6 +943,178 @@ class MultiUserCABot:
             parse_mode='Markdown'
         )
     
+    async def grant_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command to grant subscription to a user"""
+        user_id = update.effective_user.id
+        
+        # Check if admin
+        if user_id != ADMIN_USER_ID:
+            await update.message.reply_text("❌ Admin access required.")
+            return
+        
+        # Parse arguments
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "📝 *Usage:* `/grant <user_id> <tier> [days]`\n\n"
+                "**Tiers:** `starter`, `pro`, `alpha`\n"
+                "**Days:** Default 30\n\n"
+                "**Example:**\n"
+                "`/grant 123456789 pro 30`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        try:
+            target_user_id = int(context.args[0])
+            tier = context.args[1].lower()
+            days = int(context.args[2]) if len(context.args) > 2 else 30
+            
+            if tier not in ['starter', 'pro', 'alpha']:
+                await update.message.reply_text("❌ Invalid tier. Use: `starter`, `pro`, or `alpha`", parse_mode='Markdown')
+                return
+            
+            # Check if user exists
+            target_user = self.db.get_user(target_user_id)
+            if not target_user:
+                await update.message.reply_text(f"❌ User {target_user_id} not found in database.")
+                return
+            
+            # Grant subscription
+            success = self.db.update_subscription(target_user_id, tier, days)
+            
+            if success:
+                tier_emoji = {'starter': '⭐', 'pro': '💎', 'alpha': '🔥'}
+                
+                # Notify admin
+                await update.message.reply_text(
+                    f"✅ *Subscription Granted!*\n\n"
+                    f"👤 User: `{target_user_id}`\n"
+                    f"🎫 Tier: {tier_emoji.get(tier, '')} {tier.title()}\n"
+                    f"📅 Duration: {days} days",
+                    parse_mode='Markdown'
+                )
+                
+                # Try to notify the user
+                try:
+                    await context.bot.send_message(
+                        chat_id=target_user_id,
+                        text=f"🎉 *Congratulations!*\n\n"
+                             f"You've been granted {tier_emoji.get(tier, '')} *{tier.title()}* access for {days} days!\n\n"
+                             f"Send /start to see your new features.",
+                        parse_mode='Markdown'
+                    )
+                except Exception:
+                    pass  # User may have blocked the bot
+            else:
+                await update.message.reply_text("❌ Failed to grant subscription.")
+        
+        except ValueError:
+            await update.message.reply_text("❌ Invalid user ID or days. Must be numbers.")
+    
+    async def revoke_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command to revoke subscription (downgrade to free)"""
+        user_id = update.effective_user.id
+        
+        if user_id != ADMIN_USER_ID:
+            await update.message.reply_text("❌ Admin access required.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "📝 *Usage:* `/revoke <user_id>`\n\n"
+                "**Example:**\n"
+                "`/revoke 123456789`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        try:
+            target_user_id = int(context.args[0])
+            
+            target_user = self.db.get_user(target_user_id)
+            if not target_user:
+                await update.message.reply_text(f"❌ User {target_user_id} not found.")
+                return
+            
+            old_tier = target_user['subscription_tier']
+            success = self.db.update_subscription(target_user_id, 'free', 0)
+            
+            if success:
+                await update.message.reply_text(
+                    f"✅ *Subscription Revoked*\n\n"
+                    f"👤 User: `{target_user_id}`\n"
+                    f"📉 {old_tier.title()} → Free",
+                    parse_mode='Markdown'
+                )
+                
+                # Notify user
+                try:
+                    await context.bot.send_message(
+                        chat_id=target_user_id,
+                        text="⚠️ Your subscription has been changed to the free tier.",
+                    )
+                except Exception:
+                    pass
+            else:
+                await update.message.reply_text("❌ Failed to revoke subscription.")
+        
+        except ValueError:
+            await update.message.reply_text("❌ Invalid user ID.")
+    
+    async def userinfo_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command to view user info"""
+        user_id = update.effective_user.id
+        
+        if user_id != ADMIN_USER_ID:
+            await update.message.reply_text("❌ Admin access required.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "📝 *Usage:* `/userinfo <user_id>`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        try:
+            target_user_id = int(context.args[0])
+            target_user = self.db.get_user(target_user_id)
+            
+            if not target_user:
+                await update.message.reply_text(f"❌ User {target_user_id} not found.")
+                return
+            
+            stats = self.db.get_user_stats(target_user_id)
+            routes = self.db.get_user_routes(target_user_id)
+            
+            tier_emoji = {'free': '🆓', 'starter': '⭐', 'pro': '💎', 'alpha': '🔥'}
+            
+            message = f"👤 *User Info*\n\n"
+            message += f"🆔 ID: `{target_user_id}`\n"
+            message += f"👤 Username: @{target_user.get('username', 'N/A')}\n"
+            message += f"📛 Name: {target_user.get('first_name', 'N/A')}\n\n"
+            
+            message += f"🎫 *Subscription:*\n"
+            message += f"├ Tier: {tier_emoji.get(stats['subscription_tier'], '')} {stats['subscription_tier'].title()}\n"
+            if stats.get('subscription_expires'):
+                message += f"└ Expires: {stats['subscription_expires'][:10]}\n\n"
+            else:
+                message += f"└ Expires: Never (free)\n\n"
+            
+            message += f"📊 *Stats:*\n"
+            message += f"├ Routes: {len(routes)}/{stats['max_routes']}\n"
+            message += f"├ CAs Today: {stats['cas_today']}/{stats['daily_limit']}\n"
+            message += f"├ CAs This Month: {stats['cas_this_month']}\n"
+            message += f"└ Total CAs: {stats['total_cas_all_time']}\n\n"
+            
+            message += f"📅 Member since: {stats['member_since'][:10]}\n"
+            message += f"🔐 Session: {'✅ Active' if target_user.get('session_active') else '❌ Not set up'}"
+            
+            await update.message.reply_text(message, parse_mode='Markdown')
+        
+        except ValueError:
+            await update.message.reply_text("❌ Invalid user ID.")
+    
     # ==================== PAYMENT HANDLERS ====================
     
     async def handle_precheckout(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -930,9 +1174,16 @@ class MultiUserCABot:
         self.bot_app.add_handler(CommandHandler("pricing", self.pricing_command))
         self.bot_app.add_handler(CommandHandler("search", self.search_command))
         self.bot_app.add_handler(CommandHandler("export", self.export_command))
+        self.bot_app.add_handler(CommandHandler("settings", self.settings_command))
         self.bot_app.add_handler(CommandHandler("subscribe_starter", self.subscribe_starter))
         self.bot_app.add_handler(CommandHandler("subscribe_pro", self.subscribe_pro))
         self.bot_app.add_handler(CommandHandler("subscribe_alpha", self.subscribe_alpha))
+        
+        # Admin commands
+        self.bot_app.add_handler(CommandHandler("grant", self.grant_command))
+        self.bot_app.add_handler(CommandHandler("revoke", self.revoke_command))
+        self.bot_app.add_handler(CommandHandler("userinfo", self.userinfo_command))
+        
         self.bot_app.add_handler(CallbackQueryHandler(self.button_callback))
         self.bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.message_handler))
         self.bot_app.add_handler(PreCheckoutQueryHandler(self.handle_precheckout))

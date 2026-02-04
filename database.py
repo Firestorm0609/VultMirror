@@ -37,7 +37,18 @@ class Database:
             schema = f.read()
         
         conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
         conn.executescript(schema)
+        
+        # Add ca_format column if not exists (migration)
+        cursor.execute("""
+            SELECT COUNT(*) FROM pragma_table_info('users') WHERE name='ca_format'
+        """)
+        if cursor.fetchone()[0] == 0:
+            cursor.execute("ALTER TABLE users ADD COLUMN ca_format TEXT DEFAULT 'rich'")
+            conn.commit()
+            logger.info("✅ Added ca_format column to users table")
+        
         conn.close()
         logger.info("✅ Database initialized")
     
@@ -630,5 +641,28 @@ class Database:
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]
+    
+    def get_user_ca_format(self, user_id: int) -> str:
+        """Get user's CA format preference (rich or minimal)"""
+        user = self.get_user(user_id)
+        return user.get('ca_format', 'rich') if user else 'rich'
+    
+    def set_user_ca_format(self, user_id: int, format_type: str) -> bool:
+        """Set user's CA format preference"""
+        if format_type not in ['rich', 'minimal']:
+            return False
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute(
+                "UPDATE users SET ca_format = ? WHERE user_id = ?",
+                (format_type, user_id)
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"Error setting CA format: {e}")
+            return False
 
 

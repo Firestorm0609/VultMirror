@@ -171,7 +171,7 @@ class MultiUserCABot:
         link_patterns = [
             r'https?://(?:www\.)?dexscreener\.com/solana/[A-Za-z0-9]+',
             r'https?://(?:www\.)?pump\.fun/(?:coin/)?[A-Za-z0-9]+',
-            r'https?://(?:www\.)?birdeye\.so/token/[A-Za-z0-9]+\??[^\s]*',
+            r'https?://(?:www\.)?birdeye\.so/token/[A-Za-z0-9]+(?:\?[^\s]*)?',
             r'https?://(?:www\.)?dextools\.io/app/[^\s]+',
         ]
         
@@ -425,8 +425,8 @@ class MultiUserCABot:
         message = "📊 *Your Statistics*\n\n"
         message += f"💎 CAs Today: {stats['cas_today']}/{stats['daily_limit']}\n"
         message += f"🔗 URLs Today: {stats['urls_today']}\n"
-        message += f"📊 Total Today: {stats['total_today']}/{stats['daily_limit']}\n\n"
-        message += f"📈 This Month:\n"
+        message += f"📈 Combined Total: {stats['total_today']}/{stats['daily_limit']}\n\n"
+        message += f"📅 This Month:\n"
         message += f"  • CAs: {stats['cas_this_month']}\n"
         message += f"  • URLs: {stats['urls_this_month']}\n\n"
         message += f"🎯 All Time:\n"
@@ -864,7 +864,7 @@ class MultiUserCABot:
         message += f"\n📈 *Usage:*\n"
         message += f"• CAs today: {stats['cas_today']}/{stats['daily_limit']}\n"
         message += f"• URLs today: {stats['urls_today']}\n"
-        message += f"• Total today: {stats['total_today']}/{stats['daily_limit']}\n"
+        message += f"• Combined total: {stats['total_today']}/{stats['daily_limit']}\n"
         message += f"• Active routes: {stats['active_routes']}/{stats['max_routes']}\n\n"
         message += f"📅 *This Month:*\n"
         message += f"• CAs: {stats['cas_this_month']}\n"

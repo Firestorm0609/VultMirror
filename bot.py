@@ -10,6 +10,7 @@ Version: 1.0
 import re
 import os
 import asyncio
+import hashlib
 from datetime import datetime
 from typing import Dict, Set, Optional
 from dotenv import load_dotenv
@@ -142,28 +143,38 @@ class MultiUserCABot:
                 continue
             seen.add(addr.lower())
             
-            # Skip if in URL
-            url_pattern = rf'(https?://[^\s]*{re.escape(addr)}|solscan\.io[^\s]*{re.escape(addr)}|dexscreener[^\s]*{re.escape(addr)})'
+            # Skip if in URL - now includes pump.fun
+            url_pattern = rf'(https?://[^\s]*{re.escape(addr)}|solscan\.io[^\s]*{re.escape(addr)}|dexscreener[^\s]*{re.escape(addr)}|pump\.fun[^\s]*{re.escape(addr)}|birdeye\.so[^\s]*{re.escape(addr)})'
             if re.search(url_pattern, text):
                 continue
             
             filtered_addresses.append(addr)
         
-        # Fallback to first unique address if all filtered out
-        if not filtered_addresses and potential_addresses:
-            unique_addrs = []
-            seen = set()
-            for addr in potential_addresses:
-                if addr.lower() not in seen:
-                    unique_addrs.append(addr)
-                    seen.add(addr.lower())
-            filtered_addresses = unique_addrs[:1]
-        
-        # Take only first address and validate
+        # Take only first standalone address and validate
         if filtered_addresses:
             ca = filtered_addresses[0]
             if self.is_valid_solana_address(ca):
                 return ca
+        
+        return None  # Return None if only URLs found
+    
+    def extract_trading_links(self, text: str) -> Optional[str]:
+        """Extract DexScreener, Pump.fun, BirdEye, DEXTools links"""
+        if not text:
+            return None
+        
+        # Regex patterns for trading platforms
+        link_patterns = [
+            r'https?://(?:www\.)?dexscreener\.com/solana/[A-Za-z0-9]+',
+            r'https?://(?:www\.)?pump\.fun/(?:coin/)?[A-Za-z0-9]+',
+            r'https?://(?:www\.)?birdeye\.so/token/[A-Za-z0-9]+\??[^\s]*',
+            r'https?://(?:www\.)?dextools\.io/app/[^\s]+',
+        ]
+        
+        for pattern in link_patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(0)
         
         return None
     
@@ -188,64 +199,114 @@ class MultiUserCABot:
             if not matching_route:
                 return
             
-            # Check if user can forward more CAs today
-            if not self.db.can_forward_ca(user_id):
-                print(f"⚠️ User {user_id} hit daily CA limit")
-                return
-            
-            # Extract CA from message
+            # Extract message text
             message_text = event.message.message or ""
-            ca = self.extract_solana_cas(message_text)
-            
-            if not ca:
-                return
-            
-            # Check for duplicates (per user, last 24 hours)
-            if self.db.ca_already_forwarded(user_id, ca, hours=24):
-                print(f"🔄 Duplicate CA for user {user_id}: {ca}")
-                return
             
             # Get sender info
             sender = await event.get_sender()
             sender_name = self._get_entity_name(sender)
             
-            # Forward CA to user's target
+            # Get target chat and client
             target_chat_id = matching_route['target_chat_id']
             client = self.session_manager.get_user_client(user_id)
             
-            if client:
-                # Get user's format preference
-                ca_format = self.db.get_user_ca_format(user_id)
-                
-                if ca_format == 'minimal':
-                    # Just send the raw CA
-                    await client.send_message(target_chat_id, ca)
+            if not client:
+                return
+            
+            # Get user's format preference
+            ca_format = self.db.get_user_ca_format(user_id)
+            
+            # Track if we forwarded anything
+            forwarded_something = False
+            
+            # Try to extract CA first
+            ca = self.extract_solana_cas(message_text)
+            
+            if ca:
+                # Check if user can forward more CAs today
+                if self.db.can_forward_ca(user_id):
+                    # Check for duplicates (per user, last 24 hours)
+                    if not self.db.ca_already_forwarded(user_id, ca, hours=24):
+                        # Forward CA
+                        if ca_format == 'minimal':
+                            # Just send the raw CA
+                            await client.send_message(target_chat_id, ca)
+                        else:
+                            # Rich format with info
+                            ca_message = f"💎 *New CA Detected!*\n\n"
+                            ca_message += f"`{ca}`\n\n"
+                            ca_message += f"📥 From: {matching_route['source_name']}\n"
+                            ca_message += f"👤 Posted by: {sender_name}\n"
+                            ca_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                            
+                            await client.send_message(target_chat_id, ca_message, parse_mode='md')
+                        
+                        # Log the forwarded CA
+                        self.db.log_forwarded_ca(
+                            user_id=user_id,
+                            route_id=matching_route['route_id'],
+                            ca_address=ca,
+                            source_chat_id=event_chat_id,
+                            source_message_id=event.message.id,
+                            original_message=message_text[:500],
+                            sender_name=sender_name
+                        )
+                        
+                        # Increment daily count
+                        self.db.increment_daily_ca_count(user_id)
+                        forwarded_something = True
+                        
+                        logger.info(f"CA forwarded for user {user_id}: {ca[:20]}... to {matching_route['target_name']}")
+                    else:
+                        print(f"🔄 Duplicate CA for user {user_id}: {ca}")
                 else:
-                    # Rich format with info
-                    ca_message = f"💎 *New CA Detected!*\n\n"
-                    ca_message += f"`{ca}`\n\n"
-                    ca_message += f"📥 From: {matching_route['source_name']}\n"
-                    ca_message += f"👤 Posted by: {sender_name}\n"
-                    ca_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                    print(f"⚠️ User {user_id} hit daily CA limit")
+            
+            # Try to extract trading link
+            trading_link = self.extract_trading_links(message_text)
+            
+            if trading_link:
+                # Check if user can forward more today
+                if self.db.can_forward_ca(user_id):
+                    # Create URL hash for deduplication
+                    url_hash = hashlib.md5(trading_link.encode()).hexdigest()
                     
-                    await client.send_message(target_chat_id, ca_message, parse_mode='md')
-                
-                # Log the forwarded CA
-                self.db.log_forwarded_ca(
-                    user_id=user_id,
-                    route_id=matching_route['route_id'],
-                    ca_address=ca,
-                    source_chat_id=event_chat_id,
-                    source_message_id=event.message.id,
-                    original_message=message_text[:500],  # First 500 chars
-                    sender_name=sender_name
-                )
-                
-                # Increment daily count
-                self.db.increment_daily_ca_count(user_id)
-                
-                # Log success
-                logger.info(f"CA forwarded for user {user_id}: {ca[:20]}... to {matching_route['target_name']}")
+                    # Check for duplicates (per user, last 24 hours)
+                    if not self.db.url_already_forwarded(user_id, url_hash, hours=24):
+                        # Forward URL
+                        if ca_format == 'minimal':
+                            # Just send the raw URL
+                            await client.send_message(target_chat_id, trading_link)
+                        else:
+                            # Rich format with info
+                            url_message = f"🔗 *New Trading Link Detected!*\n\n"
+                            url_message += f"{trading_link}\n\n"
+                            url_message += f"📥 From: {matching_route['source_name']}\n"
+                            url_message += f"👤 Posted by: {sender_name}\n"
+                            url_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                            
+                            await client.send_message(target_chat_id, url_message, parse_mode='md')
+                        
+                        # Log the forwarded URL
+                        self.db.log_forwarded_url(
+                            user_id=user_id,
+                            route_id=matching_route['route_id'],
+                            url=trading_link,
+                            url_hash=url_hash,
+                            source_chat_id=event_chat_id,
+                            source_message_id=event.message.id,
+                            sender_name=sender_name
+                        )
+                        
+                        # Increment daily count (URLs count toward daily limit)
+                        self.db.increment_daily_ca_count(user_id)
+                        forwarded_something = True
+                        
+                        logger.info(f"URL forwarded for user {user_id}: {trading_link} to {matching_route['target_name']}")
+                    else:
+                        print(f"🔄 Duplicate URL for user {user_id}: {trading_link}")
+                else:
+                    print(f"⚠️ User {user_id} hit daily limit")
         
         except Exception as e:
             logger.error(f"Error handling message for user {user_id}: {e}", exc_info=True)
@@ -309,10 +370,21 @@ class MultiUserCABot:
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
+        user_id = update.effective_user.id
+        
+        help_text = HELP_MESSAGE
+        
+        # Add admin commands if user is admin
+        if user_id == ADMIN_USER_ID:
+            help_text += "\n\n👑 *Admin Commands:*\n"
+            help_text += "• `/grant <user_id> <tier> [days]` - Grant subscription\n"
+            help_text += "• `/revoke <user_id>` - Revoke subscription\n"
+            help_text += "• `/userinfo <user_id>` - View user details\n"
+        
         keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
         
         await update.message.reply_text(
-            HELP_MESSAGE,
+            help_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
@@ -348,8 +420,14 @@ class MultiUserCABot:
         
         message = "📊 *Your Statistics*\n\n"
         message += f"💎 CAs Today: {stats['cas_today']}/{stats['daily_limit']}\n"
-        message += f"📅 CAs This Month: {stats['cas_this_month']}\n"
-        message += f"🏆 Total CAs: {stats['total_cas_all_time']}\n"
+        message += f"🔗 URLs Today: {stats['urls_today']}\n"
+        message += f"📊 Total Today: {stats['cas_today'] + stats['urls_today']}/{stats['daily_limit']}\n\n"
+        message += f"📈 This Month:\n"
+        message += f"  • CAs: {stats['cas_this_month']}\n"
+        message += f"  • URLs: {stats['urls_this_month']}\n\n"
+        message += f"🎯 All Time:\n"
+        message += f"  • CAs: {stats['total_cas_all_time']}\n"
+        message += f"  • URLs: {stats['total_urls_all_time']}\n\n"
         message += f"📋 Active Routes: {stats['active_routes']}\n"
         
         keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
@@ -365,60 +443,92 @@ class MultiUserCABot:
         await self.show_pricing(update.message, context)
     
     async def search_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Search CA history"""
+        """Search CA and URL history"""
         user_id = update.effective_user.id
         
         if not context.args:
             await update.message.reply_text(
-                "🔍 *Search CA History*\n\n"
+                "🔍 *Search History*\n\n"
                 "Usage: `/search <query>`\n\n"
                 "Examples:\n"
-                "• `/search pump` - Find CAs containing 'pump'\n"
-                "• `/search 7xK` - Find CAs starting with '7xK'\n",
+                "• `/search pump` - Find CAs/URLs containing 'pump'\n"
+                "• `/search 7xK` - Find CAs starting with '7xK'\n"
+                "• `/search dexscreener` - Find DexScreener links\n",
                 parse_mode='Markdown'
             )
             return
         
         query = ' '.join(context.args)
-        results = self.db.search_cas(user_id, query, limit=10)
         
-        if not results:
-            await update.message.reply_text(f"No CAs found matching '{query}'")
+        # Search both CAs and URLs
+        ca_results = self.db.search_cas(user_id, query, limit=10)
+        url_results = self.db.search_urls(user_id, query, limit=10)
+        
+        if not ca_results and not url_results:
+            await update.message.reply_text(f"No results found matching '{query}'")
             return
         
         message = f"🔍 *Search Results for '{query}'*\n\n"
-        for i, ca in enumerate(results, 1):
-            message += f"{i}. `{ca['ca_address']}`\n"
-            message += f"   📅 {ca['forwarded_at'][:16]}\n"
-            if ca.get('source_name'):
-                message += f"   📥 {ca['source_name']}\n"
-            message += "\n"
+        
+        if ca_results:
+            message += "💎 *Contract Addresses:*\n"
+            for i, ca in enumerate(ca_results, 1):
+                message += f"{i}. `{ca['ca_address']}`\n"
+                message += f"   📅 {ca['forwarded_at'][:16]}\n"
+                if ca.get('source_name'):
+                    message += f"   📥 {ca['source_name']}\n"
+                message += "\n"
+        
+        if url_results:
+            message += "🔗 *Trading Links:*\n"
+            for i, url in enumerate(url_results, 1):
+                message += f"{i}. {url['url']}\n"
+                message += f"   📅 {url['forwarded_at'][:16]}\n"
+                if url.get('source_name'):
+                    message += f"   📥 {url['source_name']}\n"
+                message += "\n"
         
         await update.message.reply_text(message, parse_mode='Markdown')
     
     async def export_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Export CA history as text file"""
+        """Export CA and URL history as text file"""
         user_id = update.effective_user.id
         
-        # Get all CAs
+        # Get all CAs and URLs
         cas = self.db.get_user_cas(user_id, limit=1000)
+        urls = self.db.get_user_urls(user_id, limit=1000)
         
-        if not cas:
-            await update.message.reply_text("No CA history to export.")
+        if not cas and not urls:
+            await update.message.reply_text("No history to export.")
             return
         
         # Create export text
-        export_text = "VultMirror CA Export\n"
+        export_text = "VultMirror Export\n"
         export_text += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         export_text += "=" * 50 + "\n\n"
         
-        for ca in cas:
-            export_text += f"CA: {ca['ca_address']}\n"
-            export_text += f"Date: {ca['forwarded_at']}\n"
-            export_text += f"Sender: {ca.get('sender_name', 'Unknown')}\n"
-            if ca.get('source_name'):
-                export_text += f"Source: {ca['source_name']}\n"
-            export_text += "-" * 30 + "\n"
+        if cas:
+            export_text += "CONTRACT ADDRESSES\n"
+            export_text += "=" * 50 + "\n"
+            for ca in cas:
+                export_text += f"CA: {ca['ca_address']}\n"
+                export_text += f"Date: {ca['forwarded_at']}\n"
+                export_text += f"Sender: {ca.get('sender_name', 'Unknown')}\n"
+                if ca.get('source_name'):
+                    export_text += f"Source: {ca['source_name']}\n"
+                export_text += "-" * 30 + "\n"
+            export_text += "\n"
+        
+        if urls:
+            export_text += "TRADING LINKS\n"
+            export_text += "=" * 50 + "\n"
+            for url in urls:
+                export_text += f"URL: {url['url']}\n"
+                export_text += f"Date: {url['forwarded_at']}\n"
+                export_text += f"Sender: {url.get('sender_name', 'Unknown')}\n"
+                if url.get('source_name'):
+                    export_text += f"Source: {url['source_name']}\n"
+                export_text += "-" * 30 + "\n"
         
         # Send as file
         file = BytesIO(export_text.encode())
@@ -426,7 +536,7 @@ class MultiUserCABot:
         
         await update.message.reply_document(
             document=file,
-            caption="📁 Your CA history export"
+            caption="📁 Your history export"
         )
     
     async def settings_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -703,10 +813,21 @@ class MultiUserCABot:
     
     async def show_help_callback(self, query, context):
         """Handle help callback"""
+        user_id = query.from_user.id
+        
+        help_text = HELP_MESSAGE
+        
+        # Add admin commands if user is admin
+        if user_id == ADMIN_USER_ID:
+            help_text += "\n\n👑 *Admin Commands:*\n"
+            help_text += "• `/grant <user_id> <tier> [days]` - Grant subscription\n"
+            help_text += "• `/revoke <user_id>` - Revoke subscription\n"
+            help_text += "• `/userinfo <user_id>` - View user details\n"
+        
         keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
         
         await query.edit_message_text(
-            HELP_MESSAGE,
+            help_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
@@ -738,9 +859,15 @@ class MultiUserCABot:
         
         message += f"\n📈 *Usage:*\n"
         message += f"• CAs today: {stats['cas_today']}/{stats['daily_limit']}\n"
-        message += f"• Active routes: {stats['active_routes']}/{stats['max_routes']}\n"
-        message += f"• CAs this month: {stats['cas_this_month']}\n"
-        message += f"• Total CAs: {stats['total_cas_all_time']}\n\n"
+        message += f"• URLs today: {stats['urls_today']}\n"
+        message += f"• Total today: {stats['cas_today'] + stats['urls_today']}/{stats['daily_limit']}\n"
+        message += f"• Active routes: {stats['active_routes']}/{stats['max_routes']}\n\n"
+        message += f"📅 *This Month:*\n"
+        message += f"• CAs: {stats['cas_this_month']}\n"
+        message += f"• URLs: {stats['urls_this_month']}\n\n"
+        message += f"🎯 *All Time:*\n"
+        message += f"• Total CAs: {stats['total_cas_all_time']}\n"
+        message += f"• Total URLs: {stats['total_urls_all_time']}\n\n"
         message += f"📅 Member since: {stats['member_since'][:10]}"
         
         keyboard = [[InlineKeyboardButton("« Back", callback_data="back_to_menu")]]

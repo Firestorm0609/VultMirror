@@ -480,6 +480,27 @@ class Database:
         """, (user_id, month_start))
         cas_this_month = cursor.fetchone()[0]
         
+        # Count URLs today
+        cursor.execute("""
+            SELECT COUNT(*) FROM forwarded_urls 
+            WHERE user_id = ? AND DATE(forwarded_at) = ?
+        """, (user_id, today))
+        urls_today = cursor.fetchone()[0]
+        
+        # Count URLs this month
+        cursor.execute("""
+            SELECT COUNT(*) FROM forwarded_urls 
+            WHERE user_id = ? AND forwarded_at >= ?
+        """, (user_id, month_start))
+        urls_this_month = cursor.fetchone()[0]
+        
+        # Total URLs all time
+        cursor.execute("""
+            SELECT COUNT(*) FROM forwarded_urls 
+            WHERE user_id = ?
+        """, (user_id,))
+        total_urls = cursor.fetchone()[0]
+        
         conn.close()
         
         return {
@@ -488,9 +509,12 @@ class Database:
             'active_routes': active_routes,
             'max_routes': user['total_routes_allowed'],
             'cas_today': cas_today,
+            'urls_today': urls_today,
             'daily_limit': user['daily_ca_limit'],
             'cas_this_month': cas_this_month,
+            'urls_this_month': urls_this_month,
             'total_cas_all_time': user['total_cas_forwarded'],
+            'total_urls_all_time': total_urls,
             'member_since': user['created_at']
         }
     
@@ -538,6 +562,20 @@ class Database:
         """, (month_start,))
         cas_this_month = cursor.fetchone()[0]
         
+        # URLs forwarded today
+        cursor.execute("""
+            SELECT COUNT(*) FROM forwarded_urls 
+            WHERE DATE(forwarded_at) = ?
+        """, (today,))
+        urls_today = cursor.fetchone()[0]
+        
+        # URLs forwarded this month
+        cursor.execute("""
+            SELECT COUNT(*) FROM forwarded_urls 
+            WHERE forwarded_at >= ?
+        """, (month_start,))
+        urls_this_month = cursor.fetchone()[0]
+        
         conn.close()
         
         return {
@@ -546,7 +584,9 @@ class Database:
             'total_revenue': total_revenue,
             'active_routes': active_routes,
             'cas_today': cas_today,
-            'cas_this_month': cas_this_month
+            'cas_this_month': cas_this_month,
+            'urls_today': urls_today,
+            'urls_this_month': urls_this_month
         }
     
     def get_all_users(self, tier: str = None) -> List[Dict]:
@@ -588,6 +628,28 @@ class Database:
             ORDER BY fc.forwarded_at DESC
             LIMIT ?
         """, (user_id, f"%{query}%", f"%{query}%", f"%{query}%", limit))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    
+    def search_urls(self, user_id: int, query: str, limit: int = 10) -> List[Dict]:
+        """Search URLs by URL or source"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT fu.*, r.source_name 
+            FROM forwarded_urls fu
+            LEFT JOIN routes r ON fu.route_id = r.route_id
+            WHERE fu.user_id = ? AND (
+                fu.url LIKE ? OR
+                fu.sender_name LIKE ?
+            )
+            ORDER BY fu.forwarded_at DESC
+            LIMIT ?
+        """, (user_id, f"%{query}%", f"%{query}%", limit))
         
         rows = cursor.fetchall()
         conn.close()
@@ -664,5 +726,79 @@ class Database:
         except Exception as e:
             logger.error(f"Error setting CA format: {e}")
             return False
+    
+    # ==================== URL TRACKING ====================
+    
+    def log_forwarded_url(self, user_id: int, route_id: int, url: str, url_hash: str,
+                         source_chat_id: int, source_message_id: int = None,
+                         sender_name: str = None) -> bool:
+        """Log a forwarded URL"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                INSERT INTO forwarded_urls 
+                (user_id, route_id, url, url_hash, source_chat_id, source_message_id, sender_name)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+            """, (user_id, route_id, url, url_hash, source_chat_id, source_message_id, sender_name))
+            
+            # Update route stats
+            cursor.execute("""
+                UPDATE routes 
+                SET total_forwarded = total_forwarded + 1,
+                    last_forwarded_at = ?
+                WHERE route_id = ?
+            """, (datetime.now(), route_id))
+            
+            # Update user stats
+            cursor.execute("""
+                UPDATE users 
+                SET total_messages_forwarded = total_messages_forwarded + 1,
+                    last_active_at = ?
+                WHERE user_id = ?
+            """, (datetime.now(), user_id))
+            
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error logging URL: {e}")
+            return False
+    
+    def get_user_urls(self, user_id: int, limit: int = 1000) -> List[Dict]:
+        """Get all URLs for a user"""
+        conn = sqlite3.connect(self.db_path)
+        conn.row_factory = sqlite3.Row
+        cursor = conn.cursor()
+        
+        cursor.execute("""
+            SELECT fu.*, r.source_name 
+            FROM forwarded_urls fu
+            LEFT JOIN routes r ON fu.route_id = r.route_id
+            WHERE fu.user_id = ?
+            ORDER BY fu.forwarded_at DESC
+            LIMIT ?
+        """, (user_id, limit))
+        
+        rows = cursor.fetchall()
+        conn.close()
+        return [dict(row) for row in rows]
+    
+    def url_already_forwarded(self, user_id: int, url_hash: str, hours: int = 24) -> bool:
+        """Check if URL was already forwarded recently"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        
+        time_threshold = datetime.now() - timedelta(hours=hours)
+        
+        cursor.execute("""
+            SELECT COUNT(*) FROM forwarded_urls 
+            WHERE user_id = ? AND url_hash = ? AND forwarded_at > ?
+        """, (user_id, url_hash, time_threshold))
+        
+        count = cursor.fetchone()[0]
+        conn.close()
+        return count > 0
 
 

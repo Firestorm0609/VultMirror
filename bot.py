@@ -143,7 +143,7 @@ class MultiUserCABot:
                 continue
             seen.add(addr.lower())
             
-            # Skip if in URL - now includes pump.fun
+            # Skip if in URL - excludes CAs found in trading platform URLs
             url_pattern = rf'(https?://[^\s]*{re.escape(addr)}|solscan\.io[^\s]*{re.escape(addr)}|dexscreener[^\s]*{re.escape(addr)}|pump\.fun[^\s]*{re.escape(addr)}|birdeye\.so[^\s]*{re.escape(addr)})'
             if re.search(url_pattern, text):
                 continue
@@ -151,12 +151,13 @@ class MultiUserCABot:
             filtered_addresses.append(addr)
         
         # Take only first standalone address and validate
+        # Returns None if no standalone addresses found (e.g., only in URLs or no addresses at all)
         if filtered_addresses:
             ca = filtered_addresses[0]
             if self.is_valid_solana_address(ca):
                 return ca
         
-        return None  # Return None if only URLs found
+        return None
     
     def extract_trading_links(self, text: str) -> Optional[str]:
         """Extract DexScreener, Pump.fun, BirdEye, DEXTools links"""
@@ -223,10 +224,10 @@ class MultiUserCABot:
             ca = self.extract_solana_cas(message_text)
             
             if ca:
-                # Check if user can forward more CAs today
-                if self.db.can_forward_ca(user_id):
-                    # Check for duplicates (per user, last 24 hours)
-                    if not self.db.ca_already_forwarded(user_id, ca, hours=24):
+                # Check for duplicates first (per user, last 24 hours)
+                if not self.db.ca_already_forwarded(user_id, ca, hours=24):
+                    # Check if user can forward more CAs today
+                    if self.db.can_forward_ca(user_id):
                         # Forward CA
                         if ca_format == 'minimal':
                             # Just send the raw CA
@@ -258,21 +259,21 @@ class MultiUserCABot:
                         
                         logger.info(f"CA forwarded for user {user_id}: {ca[:20]}... to {matching_route['target_name']}")
                     else:
-                        print(f"🔄 Duplicate CA for user {user_id}: {ca}")
+                        print(f"⚠️ User {user_id} hit daily CA limit")
                 else:
-                    print(f"⚠️ User {user_id} hit daily CA limit")
+                    print(f"🔄 Duplicate CA for user {user_id}: {ca}")
             
             # Try to extract trading link
             trading_link = self.extract_trading_links(message_text)
             
             if trading_link:
-                # Check if user can forward more today
-                if self.db.can_forward_ca(user_id):
-                    # Create URL hash for deduplication
-                    url_hash = hashlib.md5(trading_link.encode()).hexdigest()
-                    
-                    # Check for duplicates (per user, last 24 hours)
-                    if not self.db.url_already_forwarded(user_id, url_hash, hours=24):
+                # Create URL hash for deduplication (using SHA-256 for better collision resistance)
+                url_hash = hashlib.sha256(trading_link.encode()).hexdigest()
+                
+                # Check for duplicates first (per user, last 24 hours)
+                if not self.db.url_already_forwarded(user_id, url_hash, hours=24):
+                    # Check if user can forward more today (URLs count toward same daily limit)
+                    if self.db.can_forward_ca(user_id):
                         # Forward URL
                         if ca_format == 'minimal':
                             # Just send the raw URL
@@ -304,9 +305,9 @@ class MultiUserCABot:
                         
                         logger.info(f"URL forwarded for user {user_id}: {trading_link} to {matching_route['target_name']}")
                     else:
-                        print(f"🔄 Duplicate URL for user {user_id}: {trading_link}")
+                        print(f"⚠️ User {user_id} hit daily limit")
                 else:
-                    print(f"⚠️ User {user_id} hit daily limit")
+                    print(f"🔄 Duplicate URL for user {user_id}: {trading_link}")
         
         except Exception as e:
             logger.error(f"Error handling message for user {user_id}: {e}", exc_info=True)

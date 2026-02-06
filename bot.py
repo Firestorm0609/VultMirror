@@ -127,7 +127,11 @@ class MultiUserCABot:
         return True
     
     def extract_solana_cas(self, text: str) -> Optional[str]:
-        """Extract and validate Solana CA from text (from your original bot)"""
+        """
+        Extract and validate Solana CA from text (from your original bot).
+        
+        Returns None if no standalone addresses found (e.g., only in URLs or no addresses at all).
+        """
         if not text:
             return None
         
@@ -151,7 +155,6 @@ class MultiUserCABot:
             filtered_addresses.append(addr)
         
         # Take only first standalone address and validate
-        # Returns None if no standalone addresses found (e.g., only in URLs or no addresses at all)
         if filtered_addresses:
             ca = filtered_addresses[0]
             if self.is_valid_solana_address(ca):
@@ -267,7 +270,7 @@ class MultiUserCABot:
             trading_link = self.extract_trading_links(message_text)
             
             if trading_link:
-                # Create URL hash for deduplication (using SHA-256 for better collision resistance)
+                # Create URL hash for deduplication
                 url_hash = hashlib.sha256(trading_link.encode()).hexdigest()
                 
                 # Check for duplicates first (per user, last 24 hours)
@@ -422,7 +425,7 @@ class MultiUserCABot:
         message = "📊 *Your Statistics*\n\n"
         message += f"💎 CAs Today: {stats['cas_today']}/{stats['daily_limit']}\n"
         message += f"🔗 URLs Today: {stats['urls_today']}\n"
-        message += f"📊 Total Today: {stats['cas_today'] + stats['urls_today']}/{stats['daily_limit']}\n\n"
+        message += f"📊 Total Today: {stats['total_today']}/{stats['daily_limit']}\n\n"
         message += f"📈 This Month:\n"
         message += f"  • CAs: {stats['cas_this_month']}\n"
         message += f"  • URLs: {stats['urls_this_month']}\n\n"
@@ -861,7 +864,7 @@ class MultiUserCABot:
         message += f"\n📈 *Usage:*\n"
         message += f"• CAs today: {stats['cas_today']}/{stats['daily_limit']}\n"
         message += f"• URLs today: {stats['urls_today']}\n"
-        message += f"• Total today: {stats['cas_today'] + stats['urls_today']}/{stats['daily_limit']}\n"
+        message += f"• Total today: {stats['total_today']}/{stats['daily_limit']}\n"
         message += f"• Active routes: {stats['active_routes']}/{stats['max_routes']}\n\n"
         message += f"📅 *This Month:*\n"
         message += f"• CAs: {stats['cas_this_month']}\n"

@@ -510,6 +510,7 @@ class Database:
             'max_routes': user['total_routes_allowed'],
             'cas_today': cas_today,
             'urls_today': urls_today,
+            'total_today': cas_today + urls_today,
             'daily_limit': user['daily_ca_limit'],
             'cas_this_month': cas_this_month,
             'urls_this_month': urls_this_month,

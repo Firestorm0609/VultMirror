@@ -192,60 +192,61 @@ class MultiUserCABot:
             if not routes:
                 return
             
-            # Find matching route
+            # Find ALL matching routes for this source
             event_chat_id = event.chat_id
-            matching_route = None
-            for route in routes:
-                if route['source_chat_id'] == event_chat_id:
-                    matching_route = route
-                    break
-            
-            if not matching_route:
+            matching_routes = [r for r in routes if r['source_chat_id'] == event_chat_id]
+
+            if not matching_routes:
                 return
-            
+
             # Extract message text
             message_text = event.message.message or ""
-            
+
             # Get sender info
             sender = await event.get_sender()
             sender_name = self._get_entity_name(sender)
-            
-            # Get target chat and client
-            target_chat_id = matching_route['target_chat_id']
+
             client = self.session_manager.get_user_client(user_id)
-            
+
             if not client:
                 return
-            
+
             # Get user's format preference
             ca_format = self.db.get_user_ca_format(user_id)
-            
+
             # Track if we forwarded anything
             forwarded_something = False
-            
+
             # Try to extract CA first
             ca = self.extract_solana_cas(message_text)
-            
-            if ca:
-                # Check for duplicates first (per user, last 24 hours)
-                if not self.db.ca_already_forwarded(user_id, ca, hours=24):
-                    # Check if user can forward more CAs today
-                    if self.db.can_forward_ca(user_id):
-                        # Forward CA
+            # Try to extract trading link
+            trading_link = self.extract_trading_links(message_text)
+            url_hash = hashlib.sha256(trading_link.encode()).hexdigest() if trading_link else None
+
+            # Check duplicates once, before looping over routes
+            ca_is_duplicate = bool(ca and self.db.ca_already_forwarded(user_id, ca, hours=24))
+            url_is_duplicate = bool(trading_link and self.db.url_already_forwarded(user_id, url_hash, hours=24))
+
+            # Forward to every matching destination
+            for matching_route in matching_routes:
+                target_chat_id = matching_route['target_chat_id']
+
+                if ca:
+                    if ca_is_duplicate:
+                        print(f"🔄 Duplicate CA for user {user_id}: {ca}")
+                    elif not self.db.can_forward_ca(user_id):
+                        print(f"⚠️ User {user_id} hit daily CA limit")
+                    else:
                         if ca_format == 'minimal':
-                            # Just send the raw CA
                             await client.send_message(target_chat_id, ca)
                         else:
-                            # Rich format with info
                             ca_message = f"💎 *New CA Detected!*\n\n"
                             ca_message += f"`{ca}`\n\n"
                             ca_message += f"📥 From: {matching_route['source_name']}\n"
                             ca_message += f"👤 Posted by: {sender_name}\n"
                             ca_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
-                            
                             await client.send_message(target_chat_id, ca_message, parse_mode='md')
-                        
-                        # Log the forwarded CA
+
                         self.db.log_forwarded_ca(
                             user_id=user_id,
                             route_id=matching_route['route_id'],
@@ -255,43 +256,26 @@ class MultiUserCABot:
                             original_message=message_text[:500],
                             sender_name=sender_name
                         )
-                        
-                        # Increment daily count
                         self.db.increment_daily_ca_count(user_id)
                         forwarded_something = True
-                        
                         logger.info(f"CA forwarded for user {user_id}: {ca[:20]}... to {matching_route['target_name']}")
+
+                if trading_link:
+                    if url_is_duplicate:
+                        print(f"🔄 Duplicate URL for user {user_id}: {trading_link}")
+                    elif not self.db.can_forward_ca(user_id):
+                        print(f"⚠️ User {user_id} hit daily limit")
                     else:
-                        print(f"⚠️ User {user_id} hit daily CA limit")
-                else:
-                    print(f"🔄 Duplicate CA for user {user_id}: {ca}")
-            
-            # Try to extract trading link
-            trading_link = self.extract_trading_links(message_text)
-            
-            if trading_link:
-                # Create URL hash for deduplication
-                url_hash = hashlib.sha256(trading_link.encode()).hexdigest()
-                
-                # Check for duplicates first (per user, last 24 hours)
-                if not self.db.url_already_forwarded(user_id, url_hash, hours=24):
-                    # Check if user can forward more today (URLs count toward same daily limit)
-                    if self.db.can_forward_ca(user_id):
-                        # Forward URL
                         if ca_format == 'minimal':
-                            # Just send the raw URL
                             await client.send_message(target_chat_id, trading_link)
                         else:
-                            # Rich format with info
                             url_message = f"🔗 *New Trading Link Detected!*\n\n"
                             url_message += f"{trading_link}\n\n"
                             url_message += f"📥 From: {matching_route['source_name']}\n"
                             url_message += f"👤 Posted by: {sender_name}\n"
                             url_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
-                            
                             await client.send_message(target_chat_id, url_message, parse_mode='md')
-                        
-                        # Log the forwarded URL
+
                         self.db.log_forwarded_url(
                             user_id=user_id,
                             route_id=matching_route['route_id'],
@@ -301,16 +285,9 @@ class MultiUserCABot:
                             source_message_id=event.message.id,
                             sender_name=sender_name
                         )
-                        
-                        # Increment daily count (URLs count toward daily limit)
                         self.db.increment_daily_ca_count(user_id)
                         forwarded_something = True
-                        
                         logger.info(f"URL forwarded for user {user_id}: {trading_link} to {matching_route['target_name']}")
-                    else:
-                        print(f"⚠️ User {user_id} hit daily limit")
-                else:
-                    print(f"🔄 Duplicate URL for user {user_id}: {trading_link}")
         
         except Exception as e:
             logger.error(f"Error handling message for user {user_id}: {e}", exc_info=True)

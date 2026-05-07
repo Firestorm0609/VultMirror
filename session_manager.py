@@ -19,6 +19,7 @@ class SessionManager:
         self.db = db
         self.message_handler = message_handler  # Callback for handling messages
         self.user_clients: Dict[int, TelegramClient] = {}
+        self.pending_auth: Dict[int, dict] = {}  # Store phone_code_hash for pending auths
         self.session_dir = "sessions"
         
         # Create sessions directory if not exists
@@ -44,8 +45,15 @@ class SessionManager:
                 self.user_clients[user_id] = client
                 return (True, "Already authenticated!")
             
-            # Send code request
-            await client.send_code_request(phone)
+            # Send code request and STORE the phone_code_hash
+            sent_code = await client.send_code_request(phone)
+            
+            # Store pending auth data including the hash
+            self.pending_auth[user_id] = {
+                'phone_code_hash': sent_code.phone_code_hash,
+                'client': client  # Keep client connected
+            }
+            
             return (True, "Code sent! Waiting for verification code...")
             
         except FloodWaitError as e:
@@ -55,6 +63,19 @@ class SessionManager:
             traceback.print_exc()
             return (False, f"Error: {str(e)}")
     
+    def _clean_verification_code(self, code: str) -> str:
+        """
+        Clean and reconstruct verification code from obfuscated input.
+        Users enter codes with spaces/dashes to avoid Telegram's sharing detection.
+        Examples:
+            "1 2 3 4 5" -> "12345"
+            "1-2-3-4-5" -> "12345"
+            "12 34 5" -> "12345"
+        """
+        # Remove spaces, dashes, dots, and any other separators
+        cleaned = ''.join(char for char in code if char.isdigit())
+        return cleaned
+    
     async def verify_code(self, user_id: int, api_id: str, api_hash: str,
                          phone: str, code: str) -> tuple[bool, str]:
         """
@@ -62,15 +83,27 @@ class SessionManager:
         Returns: (success: bool, message: str)
         """
         try:
-            session_path = f"{self.session_dir}/user_{user_id}"
+            # Get pending auth data
+            if user_id not in self.pending_auth:
+                return (False, "Session expired. Please start authentication again with /start")
             
-            # Recreate client
-            client = TelegramClient(session_path, int(api_id), api_hash)
-            await client.connect()
+            # Clean the obfuscated code
+            clean_code = self._clean_verification_code(code)
             
-            # Sign in with code
+            if not clean_code:
+                return (False, "Invalid code format. Please enter a verification code containing at least one digit.")
+            
+            pending = self.pending_auth[user_id]
+            phone_code_hash = pending['phone_code_hash']
+            client = pending['client']
+            
+            # Make sure client is still connected
+            if not client.is_connected():
+                await client.connect()
+            
+            # Sign in with code AND phone_code_hash
             try:
-                await client.sign_in(phone, code)
+                await client.sign_in(phone, clean_code, phone_code_hash=phone_code_hash)
             except SessionPasswordNeededError:
                 return (False, "2FA is enabled. Please disable it temporarily and try again.")
             except PhoneCodeInvalidError:
@@ -83,8 +116,9 @@ class SessionManager:
             # Get user info
             me = await client.get_me()
             
-            # Store client
+            # Store client and clean up pending auth
             self.user_clients[user_id] = client
+            del self.pending_auth[user_id]
             
             # Update database
             self.db.update_user_credentials(user_id, api_id, api_hash, phone)
@@ -97,6 +131,8 @@ class SessionManager:
         except Exception as e:
             print(f"❌ Error verifying code for user {user_id}: {e}")
             traceback.print_exc()
+            # Clean up pending auth on error
+            await self.cleanup_pending_auth(user_id)
             return (False, f"Error: {str(e)}")
     
     async def setup_monitoring(self, user_id: int, client: TelegramClient):
@@ -253,6 +289,19 @@ class SessionManager:
         except Exception as e:
             print(f"❌ Error forwarding message: {e}")
             return False
+    
+    async def cleanup_pending_auth(self, user_id: int):
+        """Clean up pending authentication for a user"""
+        if user_id in self.pending_auth:
+            client = None
+            try:
+                client = self.pending_auth[user_id].get('client')
+                if client and client.is_connected():
+                    await client.disconnect()
+            except Exception:
+                pass
+            finally:
+                del self.pending_auth[user_id]
     
     async def disconnect_user(self, user_id: int):
         """Disconnect a user's client"""

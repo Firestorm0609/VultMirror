@@ -10,6 +10,7 @@ Version: 1.0
 import re
 import os
 import asyncio
+import hashlib
 from datetime import datetime
 from typing import Dict, Set, Optional
 from dotenv import load_dotenv
@@ -49,6 +50,9 @@ IGNORE_ADDRESSES = {
 }
 IGNORE_PREFIXES = ['bafk', 'Qm']
 
+# Minimum length for verification codes
+MIN_VERIFICATION_CODE_LENGTH = 5
+
 # User states for conversation flow
 USER_STATES = {
     'AWAITING_API_ID': 'awaiting_api_id',
@@ -87,6 +91,10 @@ A bot that monitors Telegram channels for Solana contract addresses (CAs) and fo
 
 ❓ Need more help? Contact the admin!"""
 
+# Subscription tier configuration
+TIER_EMOJI = {'free': '🆓', 'starter': '⭐', 'pro': '💎', 'alpha': '🔥'}
+VALID_TIERS = ['starter', 'pro', 'alpha']
+
 
 class MultiUserCABot:
     """Main bot orchestrator for multi-user CA monitoring"""
@@ -119,7 +127,11 @@ class MultiUserCABot:
         return True
     
     def extract_solana_cas(self, text: str) -> Optional[str]:
-        """Extract and validate Solana CA from text (from your original bot)"""
+        """
+        Extract and validate Solana CA from text (from your original bot).
+        
+        Returns None if no standalone addresses found (e.g., only in URLs or no addresses at all).
+        """
         if not text:
             return None
         
@@ -135,28 +147,38 @@ class MultiUserCABot:
                 continue
             seen.add(addr.lower())
             
-            # Skip if in URL
-            url_pattern = rf'(https?://[^\s]*{re.escape(addr)}|solscan\.io[^\s]*{re.escape(addr)}|dexscreener[^\s]*{re.escape(addr)})'
+            # Skip if in URL - excludes CAs found in trading platform URLs
+            url_pattern = rf'(https?://[^\s]*{re.escape(addr)}|solscan\.io[^\s]*{re.escape(addr)}|dexscreener[^\s]*{re.escape(addr)}|pump\.fun[^\s]*{re.escape(addr)}|birdeye\.so[^\s]*{re.escape(addr)})'
             if re.search(url_pattern, text):
                 continue
             
             filtered_addresses.append(addr)
         
-        # Fallback to first unique address if all filtered out
-        if not filtered_addresses and potential_addresses:
-            unique_addrs = []
-            seen = set()
-            for addr in potential_addresses:
-                if addr.lower() not in seen:
-                    unique_addrs.append(addr)
-                    seen.add(addr.lower())
-            filtered_addresses = unique_addrs[:1]
-        
-        # Take only first address and validate
+        # Take only first standalone address and validate
         if filtered_addresses:
             ca = filtered_addresses[0]
             if self.is_valid_solana_address(ca):
                 return ca
+        
+        return None
+    
+    def extract_trading_links(self, text: str) -> Optional[str]:
+        """Extract DexScreener, Pump.fun, BirdEye, DEXTools links"""
+        if not text:
+            return None
+        
+        # Regex patterns for trading platforms
+        link_patterns = [
+            r'https?://(?:www\.)?dexscreener\.com/solana/[A-Za-z0-9]+',
+            r'https?://(?:www\.)?pump\.fun/(?:coin/)?[A-Za-z0-9]+',
+            r'https?://(?:www\.)?birdeye\.so/token/[A-Za-z0-9]+(?:\?[^\s]*)?',
+            r'https?://(?:www\.)?dextools\.io/app/[^\s]+',
+        ]
+        
+        for pattern in link_patterns:
+            match = re.search(pattern, text)
+            if match:
+                return match.group(0)
         
         return None
     
@@ -181,51 +203,114 @@ class MultiUserCABot:
             if not matching_route:
                 return
             
-            # Check if user can forward more CAs today
-            if not self.db.can_forward_ca(user_id):
-                print(f"⚠️ User {user_id} hit daily CA limit")
-                return
-            
-            # Extract CA from message
+            # Extract message text
             message_text = event.message.message or ""
-            ca = self.extract_solana_cas(message_text)
-            
-            if not ca:
-                return
-            
-            # Check for duplicates (per user, last 24 hours)
-            if self.db.ca_already_forwarded(user_id, ca, hours=24):
-                print(f"🔄 Duplicate CA for user {user_id}: {ca}")
-                return
             
             # Get sender info
             sender = await event.get_sender()
             sender_name = self._get_entity_name(sender)
             
-            # Forward CA to user's target
+            # Get target chat and client
             target_chat_id = matching_route['target_chat_id']
             client = self.session_manager.get_user_client(user_id)
             
-            if client:
-                # Send just the CA
-                await client.send_message(target_chat_id, ca)
+            if not client:
+                return
+            
+            # Get user's format preference
+            ca_format = self.db.get_user_ca_format(user_id)
+            
+            # Track if we forwarded anything
+            forwarded_something = False
+            
+            # Try to extract CA first
+            ca = self.extract_solana_cas(message_text)
+            
+            if ca:
+                # Check for duplicates first (per user, last 24 hours)
+                if not self.db.ca_already_forwarded(user_id, ca, hours=24):
+                    # Check if user can forward more CAs today
+                    if self.db.can_forward_ca(user_id):
+                        # Forward CA
+                        if ca_format == 'minimal':
+                            # Just send the raw CA
+                            await client.send_message(target_chat_id, ca)
+                        else:
+                            # Rich format with info
+                            ca_message = f"💎 *New CA Detected!*\n\n"
+                            ca_message += f"`{ca}`\n\n"
+                            ca_message += f"📥 From: {matching_route['source_name']}\n"
+                            ca_message += f"👤 Posted by: {sender_name}\n"
+                            ca_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                            
+                            await client.send_message(target_chat_id, ca_message, parse_mode='md')
+                        
+                        # Log the forwarded CA
+                        self.db.log_forwarded_ca(
+                            user_id=user_id,
+                            route_id=matching_route['route_id'],
+                            ca_address=ca,
+                            source_chat_id=event_chat_id,
+                            source_message_id=event.message.id,
+                            original_message=message_text[:500],
+                            sender_name=sender_name
+                        )
+                        
+                        # Increment daily count
+                        self.db.increment_daily_ca_count(user_id)
+                        forwarded_something = True
+                        
+                        logger.info(f"CA forwarded for user {user_id}: {ca[:20]}... to {matching_route['target_name']}")
+                    else:
+                        print(f"⚠️ User {user_id} hit daily CA limit")
+                else:
+                    print(f"🔄 Duplicate CA for user {user_id}: {ca}")
+            
+            # Try to extract trading link
+            trading_link = self.extract_trading_links(message_text)
+            
+            if trading_link:
+                # Create URL hash for deduplication
+                url_hash = hashlib.sha256(trading_link.encode()).hexdigest()
                 
-                # Log the forwarded CA
-                self.db.log_forwarded_ca(
-                    user_id=user_id,
-                    route_id=matching_route['route_id'],
-                    ca_address=ca,
-                    source_chat_id=event_chat_id,
-                    source_message_id=event.message.id,
-                    original_message=message_text[:500],  # First 500 chars
-                    sender_name=sender_name
-                )
-                
-                # Increment daily count
-                self.db.increment_daily_ca_count(user_id)
-                
-                # Log success
-                logger.info(f"CA forwarded for user {user_id}: {ca[:20]}... to {matching_route['target_name']}")
+                # Check for duplicates first (per user, last 24 hours)
+                if not self.db.url_already_forwarded(user_id, url_hash, hours=24):
+                    # Check if user can forward more today (URLs count toward same daily limit)
+                    if self.db.can_forward_ca(user_id):
+                        # Forward URL
+                        if ca_format == 'minimal':
+                            # Just send the raw URL
+                            await client.send_message(target_chat_id, trading_link)
+                        else:
+                            # Rich format with info
+                            url_message = f"🔗 *New Trading Link Detected!*\n\n"
+                            url_message += f"{trading_link}\n\n"
+                            url_message += f"📥 From: {matching_route['source_name']}\n"
+                            url_message += f"👤 Posted by: {sender_name}\n"
+                            url_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                            
+                            await client.send_message(target_chat_id, url_message, parse_mode='md')
+                        
+                        # Log the forwarded URL
+                        self.db.log_forwarded_url(
+                            user_id=user_id,
+                            route_id=matching_route['route_id'],
+                            url=trading_link,
+                            url_hash=url_hash,
+                            source_chat_id=event_chat_id,
+                            source_message_id=event.message.id,
+                            sender_name=sender_name
+                        )
+                        
+                        # Increment daily count (URLs count toward daily limit)
+                        self.db.increment_daily_ca_count(user_id)
+                        forwarded_something = True
+                        
+                        logger.info(f"URL forwarded for user {user_id}: {trading_link} to {matching_route['target_name']}")
+                    else:
+                        print(f"⚠️ User {user_id} hit daily limit")
+                else:
+                    print(f"🔄 Duplicate URL for user {user_id}: {trading_link}")
         
         except Exception as e:
             logger.error(f"Error handling message for user {user_id}: {e}", exc_info=True)
@@ -254,7 +339,7 @@ class MultiUserCABot:
         has_session = db_user and db_user['session_active']
         
         # Build welcome message
-        message = f"👋 *Welcome to CA Mirror Bot!*\n\n"
+        message = f"👋 *Welcome to VultMirror*\n\n"
         message += "💎 Monitor Solana calls from ANY channel\n"
         message += "🚀 Forward CAs instantly to your group\n"
         message += "🔒 100% private - channels won't know\n\n"
@@ -289,10 +374,21 @@ class MultiUserCABot:
     
     async def help_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /help command"""
+        user_id = update.effective_user.id
+        
+        help_text = HELP_MESSAGE
+        
+        # Add admin commands if user is admin
+        if user_id == ADMIN_USER_ID:
+            help_text += "\n\n👑 *Admin Commands:*\n"
+            help_text += "• `/grant <user_id> <tier> [days]` - Grant subscription\n"
+            help_text += "• `/revoke <user_id>` - Revoke subscription\n"
+            help_text += "• `/userinfo <user_id>` - View user details\n"
+        
         keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
         
         await update.message.reply_text(
-            HELP_MESSAGE,
+            help_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
@@ -328,8 +424,14 @@ class MultiUserCABot:
         
         message = "📊 *Your Statistics*\n\n"
         message += f"💎 CAs Today: {stats['cas_today']}/{stats['daily_limit']}\n"
-        message += f"📅 CAs This Month: {stats['cas_this_month']}\n"
-        message += f"🏆 Total CAs: {stats['total_cas_all_time']}\n"
+        message += f"🔗 URLs Today: {stats['urls_today']}\n"
+        message += f"📈 Combined Total: {stats['total_today']}/{stats['daily_limit']}\n\n"
+        message += f"📅 This Month:\n"
+        message += f"  • CAs: {stats['cas_this_month']}\n"
+        message += f"  • URLs: {stats['urls_this_month']}\n\n"
+        message += f"🎯 All Time:\n"
+        message += f"  • CAs: {stats['total_cas_all_time']}\n"
+        message += f"  • URLs: {stats['total_urls_all_time']}\n\n"
         message += f"📋 Active Routes: {stats['active_routes']}\n"
         
         keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
@@ -345,60 +447,92 @@ class MultiUserCABot:
         await self.show_pricing(update.message, context)
     
     async def search_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Search CA history"""
+        """Search CA and URL history"""
         user_id = update.effective_user.id
         
         if not context.args:
             await update.message.reply_text(
-                "🔍 *Search CA History*\n\n"
+                "🔍 *Search History*\n\n"
                 "Usage: `/search <query>`\n\n"
                 "Examples:\n"
-                "• `/search pump` - Find CAs containing 'pump'\n"
-                "• `/search 7xK` - Find CAs starting with '7xK'\n",
+                "• `/search pump` - Find CAs/URLs containing 'pump'\n"
+                "• `/search 7xK` - Find CAs starting with '7xK'\n"
+                "• `/search dexscreener` - Find DexScreener links\n",
                 parse_mode='Markdown'
             )
             return
         
         query = ' '.join(context.args)
-        results = self.db.search_cas(user_id, query, limit=10)
         
-        if not results:
-            await update.message.reply_text(f"No CAs found matching '{query}'")
+        # Search both CAs and URLs
+        ca_results = self.db.search_cas(user_id, query, limit=10)
+        url_results = self.db.search_urls(user_id, query, limit=10)
+        
+        if not ca_results and not url_results:
+            await update.message.reply_text(f"No results found matching '{query}'")
             return
         
         message = f"🔍 *Search Results for '{query}'*\n\n"
-        for i, ca in enumerate(results, 1):
-            message += f"{i}. `{ca['ca_address']}`\n"
-            message += f"   📅 {ca['forwarded_at'][:16]}\n"
-            if ca.get('source_name'):
-                message += f"   📥 {ca['source_name']}\n"
-            message += "\n"
+        
+        if ca_results:
+            message += "💎 *Contract Addresses:*\n"
+            for i, ca in enumerate(ca_results, 1):
+                message += f"{i}. `{ca['ca_address']}`\n"
+                message += f"   📅 {ca['forwarded_at'][:16]}\n"
+                if ca.get('source_name'):
+                    message += f"   📥 {ca['source_name']}\n"
+                message += "\n"
+        
+        if url_results:
+            message += "🔗 *Trading Links:*\n"
+            for i, url in enumerate(url_results, 1):
+                message += f"{i}. {url['url']}\n"
+                message += f"   📅 {url['forwarded_at'][:16]}\n"
+                if url.get('source_name'):
+                    message += f"   📥 {url['source_name']}\n"
+                message += "\n"
         
         await update.message.reply_text(message, parse_mode='Markdown')
     
     async def export_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
-        """Export CA history as text file"""
+        """Export CA and URL history as text file"""
         user_id = update.effective_user.id
         
-        # Get all CAs
+        # Get all CAs and URLs
         cas = self.db.get_user_cas(user_id, limit=1000)
+        urls = self.db.get_user_urls(user_id, limit=1000)
         
-        if not cas:
-            await update.message.reply_text("No CA history to export.")
+        if not cas and not urls:
+            await update.message.reply_text("No history to export.")
             return
         
         # Create export text
-        export_text = "VultMirror CA Export\n"
+        export_text = "VultMirror Export\n"
         export_text += f"Generated: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
         export_text += "=" * 50 + "\n\n"
         
-        for ca in cas:
-            export_text += f"CA: {ca['ca_address']}\n"
-            export_text += f"Date: {ca['forwarded_at']}\n"
-            export_text += f"Sender: {ca.get('sender_name', 'Unknown')}\n"
-            if ca.get('source_name'):
-                export_text += f"Source: {ca['source_name']}\n"
-            export_text += "-" * 30 + "\n"
+        if cas:
+            export_text += "CONTRACT ADDRESSES\n"
+            export_text += "=" * 50 + "\n"
+            for ca in cas:
+                export_text += f"CA: {ca['ca_address']}\n"
+                export_text += f"Date: {ca['forwarded_at']}\n"
+                export_text += f"Sender: {ca.get('sender_name', 'Unknown')}\n"
+                if ca.get('source_name'):
+                    export_text += f"Source: {ca['source_name']}\n"
+                export_text += "-" * 30 + "\n"
+            export_text += "\n"
+        
+        if urls:
+            export_text += "TRADING LINKS\n"
+            export_text += "=" * 50 + "\n"
+            for url in urls:
+                export_text += f"URL: {url['url']}\n"
+                export_text += f"Date: {url['forwarded_at']}\n"
+                export_text += f"Sender: {url.get('sender_name', 'Unknown')}\n"
+                if url.get('source_name'):
+                    export_text += f"Source: {url['source_name']}\n"
+                export_text += "-" * 30 + "\n"
         
         # Send as file
         file = BytesIO(export_text.encode())
@@ -406,8 +540,54 @@ class MultiUserCABot:
         
         await update.message.reply_document(
             document=file,
-            caption="📁 Your CA history export"
+            caption="📁 Your history export"
         )
+    
+    async def settings_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Handle /settings command"""
+        await self.show_settings(update.message, update.effective_user.id)
+    
+    async def show_settings(self, message_or_query, user_id: int, edit: bool = False):
+        """Show settings menu"""
+        current_format = self.db.get_user_ca_format(user_id)
+        
+        rich_check = "✓" if current_format == 'rich' else ""
+        minimal_check = "✓" if current_format == 'minimal' else ""
+        
+        msg = "⚙️ *Settings*\n\n"
+        msg += "📋 *CA Message Format:*\n"
+        if current_format == 'rich':
+            msg += "Current: 💎 Rich (with source info & links)\n\n"
+        else:
+            msg += "Current: 📋 Minimal (just the CA)\n\n"
+        
+        msg += "*Preview:*\n"
+        if current_format == 'rich':
+            msg += "```\n💎 New CA Detected!\n\n7xKXtg2CW87d97TXJ...\n\n📥 From: Alpha Calls\n👤 Posted by: @trader123\n⏰ 15:42:33\n```\n"
+        else:
+            msg += "```\n7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU\n```\n"
+        
+        keyboard = [
+            [
+                InlineKeyboardButton(f"💎 Rich {rich_check}", callback_data="set_format_rich"),
+                InlineKeyboardButton(f"📋 Minimal {minimal_check}", callback_data="set_format_minimal")
+            ],
+            [InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]
+        ]
+        
+        if edit and hasattr(message_or_query, 'edit_message_text'):
+            await message_or_query.edit_message_text(
+                msg,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        else:
+            target = message_or_query if hasattr(message_or_query, 'reply_text') else message_or_query.message
+            await target.reply_text(
+                msg,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
     
     async def show_main_menu(self, query, context):
         """Show main menu in response to callback"""
@@ -440,7 +620,10 @@ class MultiUserCABot:
             InlineKeyboardButton("💰 Pricing", callback_data="pricing"),
             InlineKeyboardButton("📊 Stats", callback_data="my_stats")
         ])
-        keyboard.append([InlineKeyboardButton("❓ Help", callback_data="show_help")])
+        keyboard.append([
+            InlineKeyboardButton("⚙️ Settings", callback_data="settings"),
+            InlineKeyboardButton("❓ Help", callback_data="show_help")
+        ])
         
         if user_id == ADMIN_USER_ID:
             keyboard.append([InlineKeyboardButton("👑 Admin Panel", callback_data="admin_panel")])
@@ -478,6 +661,16 @@ class MultiUserCABot:
             await self.show_main_menu(query, context)
         elif data == "show_help":
             await self.show_help_callback(query, context)
+        elif data == "settings":
+            await self.show_settings(query, user_id, edit=True)
+        elif data == "set_format_rich":
+            self.db.set_user_ca_format(user_id, 'rich')
+            await query.answer("✅ Format set to Rich!")
+            await self.show_settings(query, user_id, edit=True)
+        elif data == "set_format_minimal":
+            self.db.set_user_ca_format(user_id, 'minimal')
+            await query.answer("✅ Format set to Minimal!")
+            await self.show_settings(query, user_id, edit=True)
         elif data.startswith("toggle_route_"):
             route_id = int(data.split("_")[2])
             await self.toggle_route(query, context, route_id)
@@ -624,10 +817,21 @@ class MultiUserCABot:
     
     async def show_help_callback(self, query, context):
         """Handle help callback"""
+        user_id = query.from_user.id
+        
+        help_text = HELP_MESSAGE
+        
+        # Add admin commands if user is admin
+        if user_id == ADMIN_USER_ID:
+            help_text += "\n\n👑 *Admin Commands:*\n"
+            help_text += "• `/grant <user_id> <tier> [days]` - Grant subscription\n"
+            help_text += "• `/revoke <user_id>` - Revoke subscription\n"
+            help_text += "• `/userinfo <user_id>` - View user details\n"
+        
         keyboard = [[InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")]]
         
         await query.edit_message_text(
-            HELP_MESSAGE,
+            help_text,
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode='Markdown'
         )
@@ -659,9 +863,15 @@ class MultiUserCABot:
         
         message += f"\n📈 *Usage:*\n"
         message += f"• CAs today: {stats['cas_today']}/{stats['daily_limit']}\n"
-        message += f"• Active routes: {stats['active_routes']}/{stats['max_routes']}\n"
-        message += f"• CAs this month: {stats['cas_this_month']}\n"
-        message += f"• Total CAs: {stats['total_cas_all_time']}\n\n"
+        message += f"• URLs today: {stats['urls_today']}\n"
+        message += f"• Combined total: {stats['total_today']}/{stats['daily_limit']}\n"
+        message += f"• Active routes: {stats['active_routes']}/{stats['max_routes']}\n\n"
+        message += f"📅 *This Month:*\n"
+        message += f"• CAs: {stats['cas_this_month']}\n"
+        message += f"• URLs: {stats['urls_this_month']}\n\n"
+        message += f"🎯 *All Time:*\n"
+        message += f"• Total CAs: {stats['total_cas_all_time']}\n"
+        message += f"• Total URLs: {stats['total_urls_all_time']}\n\n"
         message += f"📅 Member since: {stats['member_since'][:10]}"
         
         keyboard = [[InlineKeyboardButton("« Back", callback_data="back_to_menu")]]
@@ -733,7 +943,13 @@ class MultiUserCABot:
                 self.user_states[user_id]['state'] = USER_STATES['AWAITING_CODE']
                 await update.message.reply_text(
                     f"✅ {message}\n\n"
-                    "📲 Check Telegram! Enter the verification code:"
+                    "📲 Check Telegram for your verification code!\n\n"
+                    "⚠️ *IMPORTANT:* To avoid Telegram blocking the login:\n"
+                    "Enter the code with *spaces between each digit*\n\n"
+                    "Example: If your code is `12345`, send:\n"
+                    "`1 2 3 4 5`\n\n"
+                    "This prevents Telegram from detecting it as code sharing.",
+                    parse_mode='Markdown'
                 )
             else:
                 await update.message.reply_text(f"❌ {message}\n\nTry again from /start")
@@ -741,6 +957,17 @@ class MultiUserCABot:
         
         elif state == USER_STATES['AWAITING_CODE']:
             code = text.strip()
+            
+            # Validate format - should contain enough digits
+            # Use the same cleaning logic as session_manager to stay consistent
+            digits_only = ''.join(c for c in code if c.isdigit())
+            if len(digits_only) < MIN_VERIFICATION_CODE_LENGTH:
+                await update.message.reply_text(
+                    "❌ Code seems too short.\n\n"
+                    "Remember to enter with spaces: `1 2 3 4 5`",
+                    parse_mode='Markdown'
+                )
+                return
             
             success, message = await self.session_manager.verify_code(
                 user_id, data['api_id'], data['api_hash'], data['phone'], code
@@ -851,6 +1078,174 @@ class MultiUserCABot:
             parse_mode='Markdown'
         )
     
+    async def grant_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command to grant subscription to a user"""
+        user_id = update.effective_user.id
+        
+        # Check if admin
+        if user_id != ADMIN_USER_ID:
+            await update.message.reply_text("❌ Admin access required.")
+            return
+        
+        # Parse arguments
+        if len(context.args) < 2:
+            await update.message.reply_text(
+                "📝 *Usage:* `/grant <user_id> <tier> [days]`\n\n"
+                "**Tiers:** `starter`, `pro`, `alpha`\n"
+                "**Days:** Default 30\n\n"
+                "**Example:**\n"
+                "`/grant 123456789 pro 30`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        try:
+            target_user_id = int(context.args[0])
+            tier = context.args[1].lower()
+            days = int(context.args[2]) if len(context.args) > 2 else 30
+            
+            if tier not in VALID_TIERS:
+                await update.message.reply_text("❌ Invalid tier. Use: `starter`, `pro`, or `alpha`", parse_mode='Markdown')
+                return
+            
+            # Check if user exists
+            target_user = self.db.get_user(target_user_id)
+            if not target_user:
+                await update.message.reply_text(f"❌ User {target_user_id} not found in database.")
+                return
+            
+            # Grant subscription
+            success = self.db.update_subscription(target_user_id, tier, days)
+            
+            if success:
+                # Notify admin
+                await update.message.reply_text(
+                    f"✅ *Subscription Granted!*\n\n"
+                    f"👤 User: `{target_user_id}`\n"
+                    f"🎫 Tier: {TIER_EMOJI.get(tier, '')} {tier.title()}\n"
+                    f"📅 Duration: {days} days",
+                    parse_mode='Markdown'
+                )
+                
+                # Try to notify the user
+                try:
+                    await context.bot.send_message(
+                        chat_id=target_user_id,
+                        text=f"🎉 *Congratulations!*\n\n"
+                             f"You've been granted {TIER_EMOJI.get(tier, '')} *{tier.title()}* access for {days} days!\n\n"
+                             f"Send /start to see your new features.",
+                        parse_mode='Markdown'
+                    )
+                except Exception:
+                    pass  # User may have blocked the bot
+            else:
+                await update.message.reply_text("❌ Failed to grant subscription.")
+        
+        except ValueError:
+            await update.message.reply_text("❌ Invalid user ID or days. Must be numbers.")
+    
+    async def revoke_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command to revoke subscription (downgrade to free)"""
+        user_id = update.effective_user.id
+        
+        if user_id != ADMIN_USER_ID:
+            await update.message.reply_text("❌ Admin access required.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "📝 *Usage:* `/revoke <user_id>`\n\n"
+                "**Example:**\n"
+                "`/revoke 123456789`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        try:
+            target_user_id = int(context.args[0])
+            
+            target_user = self.db.get_user(target_user_id)
+            if not target_user:
+                await update.message.reply_text(f"❌ User {target_user_id} not found.")
+                return
+            
+            old_tier = target_user['subscription_tier']
+            success = self.db.update_subscription(target_user_id, 'free', 0)
+            
+            if success:
+                await update.message.reply_text(
+                    f"✅ *Subscription Revoked*\n\n"
+                    f"👤 User: `{target_user_id}`\n"
+                    f"📉 {old_tier.title()} → Free",
+                    parse_mode='Markdown'
+                )
+                
+                # Notify user
+                try:
+                    await context.bot.send_message(
+                        chat_id=target_user_id,
+                        text="⚠️ Your subscription has been changed to the free tier.",
+                    )
+                except Exception:
+                    pass
+            else:
+                await update.message.reply_text("❌ Failed to revoke subscription.")
+        
+        except ValueError:
+            await update.message.reply_text("❌ Invalid user ID.")
+    
+    async def userinfo_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
+        """Admin command to view user info"""
+        user_id = update.effective_user.id
+        
+        if user_id != ADMIN_USER_ID:
+            await update.message.reply_text("❌ Admin access required.")
+            return
+        
+        if not context.args:
+            await update.message.reply_text(
+                "📝 *Usage:* `/userinfo <user_id>`",
+                parse_mode='Markdown'
+            )
+            return
+        
+        try:
+            target_user_id = int(context.args[0])
+            target_user = self.db.get_user(target_user_id)
+            
+            if not target_user:
+                await update.message.reply_text(f"❌ User {target_user_id} not found.")
+                return
+            
+            stats = self.db.get_user_stats(target_user_id)
+            routes = self.db.get_user_routes(target_user_id)
+            
+            message = f"👤 *User Info*\n\n"
+            message += f"🆔 ID: `{target_user_id}`\n"
+            message += f"👤 Username: @{target_user.get('username', 'N/A')}\n"
+            message += f"📛 Name: {target_user.get('first_name', 'N/A')}\n\n"
+            
+            message += f"🎫 *Subscription:*\n"
+            message += f"├ Tier: {TIER_EMOJI.get(stats['subscription_tier'], '')} {stats['subscription_tier'].title()}\n"
+            if stats.get('subscription_expires'):
+                message += f"└ Expires: {stats['subscription_expires'][:10]}\n\n"
+            else:
+                message += f"└ Expires: Never (free)\n\n"
+            
+            message += f"📊 *Stats:*\n"
+            message += f"├ Routes: {len(routes)}/{stats['max_routes']}\n"
+            message += f"├ CAs Today: {stats['cas_today']}/{stats['daily_limit']}\n"
+            message += f"├ CAs This Month: {stats['cas_this_month']}\n"
+            message += f"└ Total CAs: {stats['total_cas_all_time']}\n\n"
+            
+            message += f"📅 Member since: {stats['member_since'][:10]}\n"
+            message += f"🔐 Session: {'✅ Active' if target_user.get('session_active') else '❌ Not set up'}"
+            
+            await update.message.reply_text(message, parse_mode='Markdown')
+        
+        except ValueError:
+            await update.message.reply_text("❌ Invalid user ID.")
+    
     # ==================== PAYMENT HANDLERS ====================
     
     async def handle_precheckout(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -910,9 +1305,16 @@ class MultiUserCABot:
         self.bot_app.add_handler(CommandHandler("pricing", self.pricing_command))
         self.bot_app.add_handler(CommandHandler("search", self.search_command))
         self.bot_app.add_handler(CommandHandler("export", self.export_command))
+        self.bot_app.add_handler(CommandHandler("settings", self.settings_command))
         self.bot_app.add_handler(CommandHandler("subscribe_starter", self.subscribe_starter))
         self.bot_app.add_handler(CommandHandler("subscribe_pro", self.subscribe_pro))
         self.bot_app.add_handler(CommandHandler("subscribe_alpha", self.subscribe_alpha))
+        
+        # Admin commands
+        self.bot_app.add_handler(CommandHandler("grant", self.grant_command))
+        self.bot_app.add_handler(CommandHandler("revoke", self.revoke_command))
+        self.bot_app.add_handler(CommandHandler("userinfo", self.userinfo_command))
+        
         self.bot_app.add_handler(CallbackQueryHandler(self.button_callback))
         self.bot_app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, self.message_handler))
         self.bot_app.add_handler(PreCheckoutQueryHandler(self.handle_precheckout))

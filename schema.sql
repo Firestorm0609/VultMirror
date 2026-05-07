@@ -152,12 +152,36 @@ CREATE TABLE IF NOT EXISTS admin_logs (
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Forwarded URLs tracking - for analytics and deduplication
+CREATE TABLE IF NOT EXISTS forwarded_urls (
+    url_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    route_id INTEGER NOT NULL,
+    
+    -- URL details
+    url TEXT NOT NULL,
+    url_hash TEXT NOT NULL,
+    source_chat_id INTEGER NOT NULL,
+    source_message_id INTEGER,
+    
+    -- Message content
+    sender_name TEXT,
+    
+    -- Timestamps
+    forwarded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (route_id) REFERENCES routes(route_id) ON DELETE CASCADE
+);
+
 -- Indexes for performance
 CREATE INDEX IF NOT EXISTS idx_routes_user_id ON routes(user_id);
 CREATE INDEX IF NOT EXISTS idx_routes_source ON routes(source_chat_id);
 CREATE INDEX IF NOT EXISTS idx_forwarded_cas_user ON forwarded_cas(user_id);
 CREATE INDEX IF NOT EXISTS idx_forwarded_cas_route ON forwarded_cas(route_id);
 CREATE INDEX IF NOT EXISTS idx_forwarded_cas_address ON forwarded_cas(ca_address);
+CREATE INDEX IF NOT EXISTS idx_forwarded_urls_user ON forwarded_urls(user_id);
+CREATE INDEX IF NOT EXISTS idx_forwarded_urls_hash ON forwarded_urls(url_hash);
 CREATE INDEX IF NOT EXISTS idx_payments_user ON payments(user_id);
 CREATE INDEX IF NOT EXISTS idx_users_tier ON users(subscription_tier);
 CREATE INDEX IF NOT EXISTS idx_users_expires ON users(subscription_expires_at);

@@ -223,67 +223,81 @@ class MultiUserCABot:
             ca_is_duplicate = bool(ca and self.db.ca_already_forwarded(user_id, ca, hours=24))
             url_is_duplicate = bool(trading_link and self.db.url_already_forwarded(user_id, url_hash, hours=24))
 
+            def _escape_md(text: str) -> str:
+                """Escape Telegram markdown v1 special characters in plain text fields."""
+                for ch in ('_', '*', '`', '['):
+                    text = text.replace(ch, f'\\{ch}')
+                return text
+
             # Forward to every matching destination
             for matching_route in matching_routes:
                 target_chat_id = matching_route['target_chat_id']
 
-                if ca:
-                    if ca_is_duplicate:
-                        print(f"🔄 Duplicate CA for user {user_id}: {ca}")
-                    elif not self.db.can_forward_ca(user_id):
-                        print(f"⚠️ User {user_id} hit daily CA limit")
-                    else:
-                        if ca_format == 'minimal':
-                            await client.send_message(target_chat_id, ca)
+                # Isolate each route — a bad target chat must not block the others
+                try:
+                    if ca:
+                        if ca_is_duplicate:
+                            print(f"🔄 Duplicate CA for user {user_id}: {ca}")
+                        elif not self.db.can_forward_ca(user_id):
+                            print(f"⚠️ User {user_id} hit daily CA limit")
                         else:
-                            ca_message = f"💎 *New CA Detected!*\n\n"
-                            ca_message += f"`{ca}`\n\n"
-                            ca_message += f"📥 From: {matching_route['source_name']}\n"
-                            ca_message += f"👤 Posted by: {sender_name}\n"
-                            ca_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
-                            await client.send_message(target_chat_id, ca_message, parse_mode='md')
+                            if ca_format == 'minimal':
+                                await client.send_message(target_chat_id, ca)
+                            else:
+                                ca_message = f"💎 *New CA Detected!*\n\n"
+                                ca_message += f"`{ca}`\n\n"
+                                ca_message += f"📥 From: {_escape_md(matching_route['source_name'])}\n"
+                                ca_message += f"👤 Posted by: {_escape_md(sender_name)}\n"
+                                ca_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                                await client.send_message(target_chat_id, ca_message, parse_mode='md')
 
-                        self.db.log_forwarded_ca(
-                            user_id=user_id,
-                            route_id=matching_route['route_id'],
-                            ca_address=ca,
-                            source_chat_id=event_chat_id,
-                            source_message_id=event.message.id,
-                            original_message=message_text[:500],
-                            sender_name=sender_name
-                        )
-                        self.db.increment_daily_ca_count(user_id)
-                        forward_count += 1
-                        logger.info(f"CA forwarded for user {user_id}: {ca[:20]}... to {matching_route['target_name']}")
+                            self.db.log_forwarded_ca(
+                                user_id=user_id,
+                                route_id=matching_route['route_id'],
+                                ca_address=ca,
+                                source_chat_id=event_chat_id,
+                                source_message_id=event.message.id,
+                                original_message=message_text[:500],
+                                sender_name=sender_name
+                            )
+                            self.db.increment_daily_ca_count(user_id)
+                            forward_count += 1
+                            logger.info(f"CA forwarded for user {user_id}: {ca[:20]}... to {matching_route['target_name']}")
 
-                if trading_link:
-                    if url_is_duplicate:
-                        print(f"🔄 Duplicate URL for user {user_id}: {trading_link}")
-                    elif not self.db.can_forward_ca(user_id):
-                        print(f"⚠️ User {user_id} hit daily limit")
-                    else:
-                        if ca_format == 'minimal':
-                            await client.send_message(target_chat_id, trading_link)
+                    if trading_link:
+                        if url_is_duplicate:
+                            print(f"🔄 Duplicate URL for user {user_id}: {trading_link}")
+                        elif not self.db.can_forward_ca(user_id):
+                            print(f"⚠️ User {user_id} hit daily limit")
                         else:
-                            url_message = f"🔗 *New Trading Link Detected!*\n\n"
-                            url_message += f"{trading_link}\n\n"
-                            url_message += f"📥 From: {matching_route['source_name']}\n"
-                            url_message += f"👤 Posted by: {sender_name}\n"
-                            url_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
-                            await client.send_message(target_chat_id, url_message, parse_mode='md')
+                            if ca_format == 'minimal':
+                                await client.send_message(target_chat_id, trading_link)
+                            else:
+                                url_message = f"🔗 *New Trading Link Detected!*\n\n"
+                                url_message += f"{trading_link}\n\n"
+                                url_message += f"📥 From: {_escape_md(matching_route['source_name'])}\n"
+                                url_message += f"👤 Posted by: {_escape_md(sender_name)}\n"
+                                url_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
+                                await client.send_message(target_chat_id, url_message, parse_mode='md')
 
-                        self.db.log_forwarded_url(
-                            user_id=user_id,
-                            route_id=matching_route['route_id'],
-                            url=trading_link,
-                            url_hash=url_hash,
-                            source_chat_id=event_chat_id,
-                            source_message_id=event.message.id,
-                            sender_name=sender_name
-                        )
-                        self.db.increment_daily_ca_count(user_id)
-                        forward_count += 1
-                        logger.info(f"URL forwarded for user {user_id}: {trading_link} to {matching_route['target_name']}")
+                            self.db.log_forwarded_url(
+                                user_id=user_id,
+                                route_id=matching_route['route_id'],
+                                url=trading_link,
+                                url_hash=url_hash,
+                                source_chat_id=event_chat_id,
+                                source_message_id=event.message.id,
+                                sender_name=sender_name
+                            )
+                            self.db.increment_daily_ca_count(user_id)
+                            forward_count += 1
+                            logger.info(f"URL forwarded for user {user_id}: {trading_link} to {matching_route['target_name']}")
+
+                except Exception as route_err:
+                    logger.error(
+                        f"Failed to forward to route {matching_route['route_id']} "
+                        f"(target {matching_route['target_name']}) for user {user_id}: {route_err}"
+                    )
         
         except Exception as e:
             logger.error(f"Error handling message for user {user_id}: {e}", exc_info=True)

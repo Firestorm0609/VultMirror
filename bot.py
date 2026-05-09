@@ -370,8 +370,14 @@ class MultiUserCABot:
         """Handle /routes command"""
         user_id = update.effective_user.id
         routes = self.db.get_user_routes(user_id)  # all routes, including paused
+
+        if not routes:
+            message = "📋 *Your Routes*\n\n"
+            message += "You have no routes.\n"
+            message += "Use /start to add your first route!"
         else:
-            message = f"📋 *Your Routes* ({len(routes)} active)\n\n"
+            active = sum(1 for r in routes if r['is_active'])
+            message = f"📋 *Your Routes* ({active} active, {len(routes)} total)\n\n"
             for i, route in enumerate(routes, 1):
                 status = "✅" if route['is_active'] else "⏸️"
                 message += f"{i}. {status} {route['source_name']}\n"

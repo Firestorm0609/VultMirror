@@ -188,11 +188,7 @@ class MultiUserCABot:
         """Handle messages from monitored channels (called by SessionManager)"""
         try:
             # Get user's routes
-            routes = self.db.get_user_routes(user_id)
-            if not routes:
-                return
-            
-            # Find ALL matching routes for this source
+            routes = self.db.get_user_routes(user_id, active_only=True)
             event_chat_id = event.chat_id
             matching_routes = [r for r in routes if r['source_chat_id'] == event_chat_id]
 
@@ -214,8 +210,8 @@ class MultiUserCABot:
             # Get user's format preference
             ca_format = self.db.get_user_ca_format(user_id)
 
-            # Track if we forwarded anything
-            forwarded_something = False
+            # Count forwards for this message across all routes
+            forward_count = 0
 
             # Try to extract CA first
             ca = self.extract_solana_cas(message_text)
@@ -257,7 +253,7 @@ class MultiUserCABot:
                             sender_name=sender_name
                         )
                         self.db.increment_daily_ca_count(user_id)
-                        forwarded_something = True
+                        forward_count += 1
                         logger.info(f"CA forwarded for user {user_id}: {ca[:20]}... to {matching_route['target_name']}")
 
                 if trading_link:
@@ -286,7 +282,7 @@ class MultiUserCABot:
                             sender_name=sender_name
                         )
                         self.db.increment_daily_ca_count(user_id)
-                        forwarded_something = True
+                        forward_count += 1
                         logger.info(f"URL forwarded for user {user_id}: {trading_link} to {matching_route['target_name']}")
         
         except Exception as e:
@@ -373,12 +369,7 @@ class MultiUserCABot:
     async def routes_command(self, update: Update, context: ContextTypes.DEFAULT_TYPE):
         """Handle /routes command"""
         user_id = update.effective_user.id
-        routes = self.db.get_user_routes(user_id)
-        
-        if not routes:
-            message = "📋 *Your Routes*\n\n"
-            message += "You have no active routes.\n"
-            message += "Use /start to add your first route!"
+        routes = self.db.get_user_routes(user_id)  # all routes, including paused
         else:
             message = f"📋 *Your Routes* ({len(routes)} active)\n\n"
             for i, route in enumerate(routes, 1):
@@ -702,10 +693,10 @@ class MultiUserCABot:
             )
             return
         
-        # Check route limits
+        # Check route limits (only count active routes against the cap)
         user = self.db.get_user(user_id)
-        routes = self.db.get_user_routes(user_id)
-        
+        routes = self.db.get_user_routes(user_id, active_only=True)
+
         if len(routes) >= user['total_routes_allowed']:
             message = f"❌ Route limit reached!\n\n"
             message += f"Your plan: {user['subscription_tier']}\n"
@@ -889,6 +880,14 @@ class MultiUserCABot:
                         api_hash = part.split('API_HASH:')[1].strip()
                 
                 if api_id and api_hash:
+                    valid_id, id_msg = validate_api_id(api_id)
+                    if not valid_id:
+                        await update.message.reply_text(f"❌ Invalid API ID: {id_msg}\n\nTry again:")
+                        return
+                    valid_hash, hash_msg = validate_api_hash(api_hash)
+                    if not valid_hash:
+                        await update.message.reply_text(f"❌ Invalid API Hash: {hash_msg}\n\nTry again:")
+                        return
                     data['api_id'] = api_id
                     data['api_hash'] = api_hash
                     self.user_states[user_id]['state'] = USER_STATES['AWAITING_PHONE']
@@ -905,8 +904,9 @@ class MultiUserCABot:
         
         elif state == USER_STATES['AWAITING_PHONE']:
             phone = text.strip()
-            if not phone.startswith('+'):
-                await update.message.reply_text("❌ Phone must start with + and country code")
+            valid_phone, phone_msg = validate_phone(phone)
+            if not valid_phone:
+                await update.message.reply_text(f"❌ {phone_msg}")
                 return
             
             data['phone'] = phone

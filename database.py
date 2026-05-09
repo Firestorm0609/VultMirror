@@ -153,7 +153,7 @@ class Database:
             }
             
             limits = tier_limits.get(tier, tier_limits['free'])
-            expires_at = datetime.now() + timedelta(days=duration_days)
+            expires_at = None if duration_days == 0 else datetime.now() + timedelta(days=duration_days)
             
             cursor.execute("""
                 UPDATE users 
@@ -224,20 +224,31 @@ class Database:
         conn.close()
         return True
     
+    def _reset_daily_count(self, user_id: int):
+        """Reset daily CA count to 0 for a new day (does NOT increment)"""
+        today = datetime.now().date()
+        conn = sqlite3.connect(self.db_path)
+        conn.execute(
+            "UPDATE users SET daily_ca_count = 0, last_reset_date = ? WHERE user_id = ?",
+            (today, user_id)
+        )
+        conn.commit()
+        conn.close()
+
     def can_forward_ca(self, user_id: int) -> bool:
         """Check if user can forward another CA today"""
         user = self.get_user(user_id)
         if not user:
             return False
-        
-        # Reset count if needed
+
         today = datetime.now().date()
         if user['last_reset_date']:
             last_reset = datetime.fromisoformat(user['last_reset_date']).date()
             if last_reset < today:
-                self.increment_daily_ca_count(user_id)
-                return True
-        
+                # New day — reset to 0, then re-fetch for accurate count
+                self._reset_daily_count(user_id)
+                user = self.get_user(user_id)
+
         return user['daily_ca_count'] < user['daily_ca_limit']
     
     # ==================== ROUTE MANAGEMENT ====================
@@ -277,18 +288,25 @@ class Database:
             logger.error(f"❌ Error adding route: {e}")
             return None
     
-    def get_user_routes(self, user_id: int) -> List[Dict]:
-        """Get all routes for a user"""
+    def get_user_routes(self, user_id: int, active_only: bool = False) -> List[Dict]:
+        """Get routes for a user. active_only=True restricts to is_active=1 rows."""
         conn = sqlite3.connect(self.db_path)
         conn.row_factory = sqlite3.Row
         cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT * FROM routes 
-            WHERE user_id = ? AND is_active = 1
-            ORDER BY created_at DESC
-        """, (user_id,))
-        
+
+        if active_only:
+            cursor.execute("""
+                SELECT * FROM routes
+                WHERE user_id = ? AND is_active = 1
+                ORDER BY created_at DESC
+            """, (user_id,))
+        else:
+            cursor.execute("""
+                SELECT * FROM routes
+                WHERE user_id = ?
+                ORDER BY is_active DESC, created_at DESC
+            """, (user_id,))
+
         rows = cursor.fetchall()
         conn.close()
         return [dict(row) for row in rows]
@@ -370,23 +388,8 @@ class Database:
             logger.error(f"❌ Error logging CA: {e}")
             return False
     
-    def get_user_cas(self, user_id: int, limit: int = 50) -> List[Dict]:
-        """Get recent CAs forwarded by user"""
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT * FROM forwarded_cas 
-            WHERE user_id = ?
-            ORDER BY forwarded_at DESC
-            LIMIT ?
-        """, (user_id, limit))
-        
-        rows = cursor.fetchall()
-        conn.close()
-        return [dict(row) for row in rows]
-    
+
+
     def ca_already_forwarded(self, user_id: int, ca_address: str, hours: int = 24) -> bool:
         """Check if CA was already forwarded recently"""
         conn = sqlite3.connect(self.db_path)

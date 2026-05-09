@@ -245,8 +245,9 @@ class PaymentHandler:
         now = datetime.now()
         
         if expires < now:
-            # Subscription expired, downgrade to free
-            self.db.update_subscription(user_id, 'free', 0)
+            # Only write the downgrade once (guard against repeated writes)
+            if user['subscription_tier'] != 'free':
+                self.db.update_subscription(user_id, 'free', 0)
             return (False, 'free', "Subscription expired, downgraded to free tier")
         
         days_left = (expires - now).days

@@ -37,7 +37,7 @@ def cleanup_user_session(user_id: int):
         print(f"✅ Deleted journal file")
     
     # 2. Reset database status
-    conn = sqlite3.connect('bot_data.db')
+    conn = sqlite3.connect('bot_data_multiuser.db')
     cursor = conn.cursor()
     
     # Update session status
@@ -65,11 +65,11 @@ def cleanup_user_session(user_id: int):
 
 def list_users():
     """List all users in the database"""
-    if not os.path.exists('bot_data.db'):
+    if not os.path.exists('bot_data_multiuser.db'):
         print("❌ Database not found!")
         return
     
-    conn = sqlite3.connect('bot_data.db')
+    conn = sqlite3.connect('bot_data_multiuser.db')
     cursor = conn.cursor()
     
     cursor.execute("""
@@ -117,7 +117,7 @@ def cleanup_all_sessions():
             print(f"✅ Deleted: {file}")
     
     # Reset all users in database
-    conn = sqlite3.connect('bot_data.db')
+    conn = sqlite3.connect('bot_data_multiuser.db')
     cursor = conn.cursor()
     cursor.execute("UPDATE users SET session_active = 0")
     affected = cursor.rowcount
@@ -128,7 +128,7 @@ def cleanup_all_sessions():
     print(f"📝 All users will need to /start and authenticate again\n")
 
 def main():
-    if not os.path.exists('bot_data.db'):
+    if not os.path.exists('bot_data_multiuser.db'):
         print("❌ Database not found! Make sure you're in the bot directory.")
         sys.exit(1)
     

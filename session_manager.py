@@ -116,6 +116,15 @@ class SessionManager:
             # Get user info
             me = await client.get_me()
             
+            # Disconnect any existing client before replacing it to prevent
+            # ghost event handlers that would cause double-forwarding
+            existing = self.user_clients.get(user_id)
+            if existing and existing is not client:
+                try:
+                    await existing.disconnect()
+                except Exception:
+                    pass
+
             # Store client and clean up pending auth
             self.user_clients[user_id] = client
             del self.pending_auth[user_id]
@@ -156,31 +165,34 @@ class SessionManager:
             credentials = self.db.get_user_credentials(user_id)
             if not credentials:
                 return (False, "No session found. Please authenticate first.")
-            
+
             api_id, api_hash, phone = credentials
             session_path = f"{self.session_dir}/user_{user_id}"
-            
+
             # Check if session file exists
             if not os.path.exists(f"{session_path}.session"):
+                self.db.mark_session_inactive(user_id)
                 return (False, "Session file missing. Please authenticate again.")
-            
+
             # Create client
             client = TelegramClient(session_path, int(api_id), api_hash)
             await client.connect()
-            
+
             # Verify still authorized
             if not await client.is_user_authorized():
+                await client.disconnect()
+                self.db.mark_session_inactive(user_id)
                 return (False, "Session expired. Please authenticate again.")
-            
+
             # Store client
             self.user_clients[user_id] = client
-            
+
             # Setup monitoring
             await self.setup_monitoring(user_id, client)
-            
+
             me = await client.get_me()
             return (True, f"Loaded session for {me.first_name}")
-            
+
         except Exception as e:
             print(f"❌ Error loading session for user {user_id}: {e}")
             traceback.print_exc()

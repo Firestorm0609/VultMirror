@@ -94,6 +94,21 @@ class Database:
             return dict(row)
         return None
     
+    def mark_session_inactive(self, user_id: int) -> bool:
+        """Mark a user's session as inactive in the database"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            conn.execute(
+                "UPDATE users SET session_active = 0 WHERE user_id = ?",
+                (user_id,)
+            )
+            conn.commit()
+            conn.close()
+            return True
+        except Exception as e:
+            logger.error(f"❌ Error marking session inactive: {e}")
+            return False
+
     def update_user_credentials(self, user_id: int, api_id: str, api_hash: str, phone: str) -> bool:
         """Store encrypted user credentials"""
         try:

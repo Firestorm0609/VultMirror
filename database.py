@@ -312,20 +312,19 @@ class Database:
         return [dict(row) for row in rows]
     
     def delete_route(self, user_id: int, route_id: int) -> bool:
-        """Delete a route"""
+        """Permanently delete a route (works whether active or paused)"""
         try:
             conn = sqlite3.connect(self.db_path)
             cursor = conn.cursor()
-            
-            cursor.execute("""
-                UPDATE routes 
-                SET is_active = 0
-                WHERE route_id = ? AND user_id = ?
-            """, (route_id, user_id))
-            
+
+            cursor.execute(
+                "DELETE FROM routes WHERE route_id = ? AND user_id = ?",
+                (route_id, user_id)
+            )
+            deleted = cursor.rowcount > 0
             conn.commit()
             conn.close()
-            return True
+            return deleted
         except Exception as e:
             logger.error(f"❌ Error deleting route: {e}")
             return False

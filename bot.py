@@ -769,12 +769,18 @@ class MultiUserCABot:
             message += "\n"
         
         keyboard.append([InlineKeyboardButton("« Back to Menu", callback_data="back_to_menu")])
-        
-        await query.edit_message_text(
-            message,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode='Markdown'
-        )
+
+        try:
+            await query.edit_message_text(
+                message,
+                reply_markup=InlineKeyboardMarkup(keyboard),
+                parse_mode='Markdown'
+            )
+        except Exception as e:
+            if "message is not modified" in str(e).lower():
+                pass  # content already matches — no action needed
+            else:
+                raise
     
     async def toggle_route(self, query, context, route_id: int):
         """Toggle route active/paused status"""

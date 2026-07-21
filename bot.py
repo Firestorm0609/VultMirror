@@ -219,10 +219,6 @@ class MultiUserCABot:
             trading_link = self.extract_trading_links(message_text)
             url_hash = hashlib.sha256(trading_link.encode()).hexdigest() if trading_link else None
 
-            # Check duplicates once, before looping over routes
-            ca_is_duplicate = bool(ca and self.db.ca_already_forwarded(user_id, ca, hours=24))
-            url_is_duplicate = bool(trading_link and self.db.url_already_forwarded(user_id, url_hash, hours=24))
-
             def _escape_md(text: str) -> str:
                 """Escape Telegram markdown v1 special characters in plain text fields."""
                 for ch in ('_', '*', '`', '['):
@@ -232,12 +228,27 @@ class MultiUserCABot:
             # Forward to every matching destination
             for matching_route in matching_routes:
                 target_chat_id = matching_route['target_chat_id']
+                route_id = matching_route['route_id']
+
+                # Duplicate checks are scoped per-route (not just per-user).
+                # Without this, forwarding a CA on one route would mark it as
+                # "already forwarded" for the user and silently block a
+                # different route from forwarding that same CA — which is
+                # exactly what happens with chained routes (A -> B -> C),
+                # since B's own forward of the CA looks identical to a
+                # duplicate of A's forward once you drop route_id from the check.
+                ca_is_duplicate = bool(
+                    ca and self.db.ca_already_forwarded(user_id, ca, route_id=route_id, hours=24)
+                )
+                url_is_duplicate = bool(
+                    trading_link and self.db.url_already_forwarded(user_id, url_hash, route_id=route_id, hours=24)
+                )
 
                 # Isolate each route — a bad target chat must not block the others
                 try:
                     if ca:
                         if ca_is_duplicate:
-                            print(f"🔄 Duplicate CA for user {user_id}: {ca}")
+                            print(f"🔄 Duplicate CA for user {user_id} on route {route_id}: {ca}")
                         elif not self.db.can_forward_ca(user_id):
                             print(f"⚠️ User {user_id} hit daily CA limit")
                         else:
@@ -253,7 +264,7 @@ class MultiUserCABot:
 
                             self.db.log_forwarded_ca(
                                 user_id=user_id,
-                                route_id=matching_route['route_id'],
+                                route_id=route_id,
                                 ca_address=ca,
                                 source_chat_id=event_chat_id,
                                 source_message_id=event.message.id,
@@ -266,7 +277,7 @@ class MultiUserCABot:
 
                     if trading_link:
                         if url_is_duplicate:
-                            print(f"🔄 Duplicate URL for user {user_id}: {trading_link}")
+                            print(f"🔄 Duplicate URL for user {user_id} on route {route_id}: {trading_link}")
                         elif not self.db.can_forward_ca(user_id):
                             print(f"⚠️ User {user_id} hit daily limit")
                         else:
@@ -282,7 +293,7 @@ class MultiUserCABot:
 
                             self.db.log_forwarded_url(
                                 user_id=user_id,
-                                route_id=matching_route['route_id'],
+                                route_id=route_id,
                                 url=trading_link,
                                 url_hash=url_hash,
                                 source_chat_id=event_chat_id,
@@ -1375,4 +1386,3 @@ async def main():
 
 if __name__ == "__main__":
     asyncio.run(main())
-

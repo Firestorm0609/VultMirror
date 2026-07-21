@@ -404,17 +404,31 @@ class Database:
     
 
 
-    def ca_already_forwarded(self, user_id: int, ca_address: str, hours: int = 24) -> bool:
-        """Check if CA was already forwarded recently"""
+    def ca_already_forwarded(self, user_id: int, ca_address: str, route_id: int = None, hours: int = 24) -> bool:
+        """
+        Check if CA was already forwarded recently.
+
+        Scoped to (user_id, route_id) by default so that forwarding a CA on
+        one route doesn't suppress forwarding of the same CA on a different
+        route (e.g. chained routes where one route's target is another
+        route's source). Pass route_id=None to fall back to the old
+        user-wide check.
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         time_threshold = datetime.now() - timedelta(hours=hours)
         
-        cursor.execute("""
-            SELECT COUNT(*) FROM forwarded_cas 
-            WHERE user_id = ? AND ca_address = ? AND forwarded_at > ?
-        """, (user_id, ca_address, time_threshold))
+        if route_id is not None:
+            cursor.execute("""
+                SELECT COUNT(*) FROM forwarded_cas 
+                WHERE user_id = ? AND route_id = ? AND ca_address = ? AND forwarded_at > ?
+            """, (user_id, route_id, ca_address, time_threshold))
+        else:
+            cursor.execute("""
+                SELECT COUNT(*) FROM forwarded_cas 
+                WHERE user_id = ? AND ca_address = ? AND forwarded_at > ?
+            """, (user_id, ca_address, time_threshold))
         
         count = cursor.fetchone()[0]
         conn.close()
@@ -803,20 +817,30 @@ class Database:
         conn.close()
         return [dict(row) for row in rows]
     
-    def url_already_forwarded(self, user_id: int, url_hash: str, hours: int = 24) -> bool:
-        """Check if URL was already forwarded recently"""
+    def url_already_forwarded(self, user_id: int, url_hash: str, route_id: int = None, hours: int = 24) -> bool:
+        """
+        Check if URL was already forwarded recently.
+
+        Scoped to (user_id, route_id) by default — see ca_already_forwarded
+        for rationale. Pass route_id=None to fall back to the old
+        user-wide check.
+        """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
         time_threshold = datetime.now() - timedelta(hours=hours)
         
-        cursor.execute("""
-            SELECT COUNT(*) FROM forwarded_urls 
-            WHERE user_id = ? AND url_hash = ? AND forwarded_at > ?
-        """, (user_id, url_hash, time_threshold))
+        if route_id is not None:
+            cursor.execute("""
+                SELECT COUNT(*) FROM forwarded_urls 
+                WHERE user_id = ? AND route_id = ? AND url_hash = ? AND forwarded_at > ?
+            """, (user_id, route_id, url_hash, time_threshold))
+        else:
+            cursor.execute("""
+                SELECT COUNT(*) FROM forwarded_urls 
+                WHERE user_id = ? AND url_hash = ? AND forwarded_at > ?
+            """, (user_id, url_hash, time_threshold))
         
         count = cursor.fetchone()[0]
         conn.close()
         return count > 0
-
-

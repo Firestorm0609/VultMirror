@@ -9,7 +9,7 @@ Monitor Solana contract addresses from ANY Telegram channel and instantly forwar
 - 🔍 **Smart CA Detection** - Automatically extracts valid Solana addresses
 - 🚀 **Instant Forwarding** - Zero-delay CA mirroring to your target chat
 - 👥 **Multi-User Support** - Each user has their own private monitoring
-- 🔒 **100% Private** - Source channels never know you're monitoring
+- 🔒 **100% Private** - Source channels will never know you're monitoring
 - 💰 **Subscription Tiers** - Free, Starter, Pro, and Alpha plans
 - 📊 **Analytics Dashboard** - Track your CA forwarding stats
 - 🛡️ **Encrypted Credentials** - Your API keys are safely stored

@@ -404,31 +404,50 @@ class Database:
     
 
 
-    def ca_already_forwarded(self, user_id: int, ca_address: str, route_id: int = None, hours: int = 24) -> bool:
+    def ca_already_forwarded(self, user_id: int, ca_address: str, route_id: int = None, hours: int = None) -> bool:
         """
-        Check if CA was already forwarded recently.
+        Check if CA was already forwarded.
 
         Scoped to (user_id, route_id) by default so that forwarding a CA on
         one route doesn't suppress forwarding of the same CA on a different
         route (e.g. chained routes where one route's target is another
         route's source). Pass route_id=None to fall back to the old
         user-wide check.
+
+        hours=None (default) means the CA is never re-forwarded on the same
+        route, no matter how old the last forward is. Pass a number to only
+        dedupe within that time window.
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
-        time_threshold = datetime.now() - timedelta(hours=hours)
-        
+
+        time_threshold = (datetime.now() - timedelta(hours=hours)) if hours is not None else None
+
+        # Compare case-insensitively: EVM addresses are hex (case-insensitive)
+        # and channels often repost the same token with different casing, which
+        # used to bypass dedup and get forwarded twice
         if route_id is not None:
-            cursor.execute("""
-                SELECT COUNT(*) FROM forwarded_cas 
-                WHERE user_id = ? AND route_id = ? AND ca_address = ? AND forwarded_at > ?
-            """, (user_id, route_id, ca_address, time_threshold))
+            if time_threshold is not None:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM forwarded_cas 
+                    WHERE user_id = ? AND route_id = ? AND ca_address = ? COLLATE NOCASE AND forwarded_at > ?
+                """, (user_id, route_id, ca_address, time_threshold))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM forwarded_cas 
+                    WHERE user_id = ? AND route_id = ? AND ca_address = ? COLLATE NOCASE
+                """, (user_id, route_id, ca_address))
         else:
-            cursor.execute("""
-                SELECT COUNT(*) FROM forwarded_cas 
-                WHERE user_id = ? AND ca_address = ? AND forwarded_at > ?
-            """, (user_id, ca_address, time_threshold))
+            if time_threshold is not None:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM forwarded_cas 
+                    WHERE user_id = ? AND ca_address = ? COLLATE NOCASE AND forwarded_at > ?
+                """, (user_id, ca_address, time_threshold))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM forwarded_cas 
+                    WHERE user_id = ? AND ca_address = ? COLLATE NOCASE
+                """, (user_id, ca_address))
         
         count = cursor.fetchone()[0]
         conn.close()
@@ -817,29 +836,41 @@ class Database:
         conn.close()
         return [dict(row) for row in rows]
     
-    def url_already_forwarded(self, user_id: int, url_hash: str, route_id: int = None, hours: int = 24) -> bool:
+    def url_already_forwarded(self, user_id: int, url_hash: str, route_id: int = None, hours: int = None) -> bool:
         """
-        Check if URL was already forwarded recently.
+        Check if URL was already forwarded.
 
         Scoped to (user_id, route_id) by default — see ca_already_forwarded
-        for rationale. Pass route_id=None to fall back to the old
-        user-wide check.
+        for rationale. hours=None (default) means permanent dedup on the
+        same route; pass a number to only dedupe within that window.
         """
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
-        time_threshold = datetime.now() - timedelta(hours=hours)
-        
+
+        time_threshold = (datetime.now() - timedelta(hours=hours)) if hours is not None else None
+
         if route_id is not None:
-            cursor.execute("""
-                SELECT COUNT(*) FROM forwarded_urls 
-                WHERE user_id = ? AND route_id = ? AND url_hash = ? AND forwarded_at > ?
-            """, (user_id, route_id, url_hash, time_threshold))
+            if time_threshold is not None:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM forwarded_urls 
+                    WHERE user_id = ? AND route_id = ? AND url_hash = ? AND forwarded_at > ?
+                """, (user_id, route_id, url_hash, time_threshold))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM forwarded_urls 
+                    WHERE user_id = ? AND route_id = ? AND url_hash = ?
+                """, (user_id, route_id, url_hash))
         else:
-            cursor.execute("""
-                SELECT COUNT(*) FROM forwarded_urls 
-                WHERE user_id = ? AND url_hash = ? AND forwarded_at > ?
-            """, (user_id, url_hash, time_threshold))
+            if time_threshold is not None:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM forwarded_urls 
+                    WHERE user_id = ? AND url_hash = ? AND forwarded_at > ?
+                """, (user_id, url_hash, time_threshold))
+            else:
+                cursor.execute("""
+                    SELECT COUNT(*) FROM forwarded_urls 
+                    WHERE user_id = ? AND url_hash = ?
+                """, (user_id, url_hash))
         
         count = cursor.fetchone()[0]
         conn.close()

@@ -41,7 +41,7 @@ load_dotenv()
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 ADMIN_USER_ID = int(os.getenv("ADMIN_USER_ID", "0"))
 
-# Solana CA Detection (from your original bot)
+# CA Detection — Solana base58 + EVM 0x patterns (from your original bot)
 SOLANA_CA_PATTERN = r'[1-9A-HJ-NP-Za-km-z]{32,44}'
 IGNORE_ADDRESSES = {
     '11111111111111111111111111111111',
@@ -75,7 +75,7 @@ USER_STATES = {
 HELP_MESSAGE = """📚 *VultMirror Help*
 
 🔮 *What is VultMirror?*
-A bot that monitors Telegram channels for Solana contract addresses (CAs) and forwards them to your private chat instantly.
+A bot that monitors Telegram channels for contract addresses (CAs) — Solana, EVM, and more — and forwards them to your private chat instantly.
 
 📋 *Commands:*
 • `/start` - Main menu
@@ -115,6 +115,10 @@ class MultiUserCABot:
         
         # Track user conversation states
         self.user_states: Dict[int, Dict] = {}
+
+        # Daily-limit notifications: user_id -> last date we DM'd them about
+        # hitting their cap (one notice per user per day, not per blocked CA)
+        self.limit_notified: Dict[int, str] = {}
     
     # ==================== SOLANA CA DETECTION ====================
     
@@ -322,6 +326,42 @@ class MultiUserCABot:
     
     # ==================== MESSAGE HANDLING ====================
     
+    def _notify_daily_limit(self, user_id: int):
+        """DM the user once per day when they hit their daily CA cap.
+
+        Fire-and-forget so we never block the message fan-out loop. If the
+        user has never started a private chat with the bot, the Bot API send
+        fails silently — the console warning is still printed by the caller.
+        """
+        today = datetime.now().strftime('%Y-%m-%d')
+        if self.limit_notified.get(user_id) == today:
+            return  # already told them today
+        self.limit_notified[user_id] = today
+
+        user = self.db.get_user(user_id)
+        tier = user['subscription_tier'] if user else 'free'
+        limit = user['daily_ca_limit'] if user else 3
+
+        async def _send():
+            try:
+                if not self.bot_app:
+                    return
+                await self.bot_app.bot.send_message(
+                    user_id,
+                    f"⚠️ *Daily limit reached* — {tier} tier allows "
+                    f"{limit} forwards/day.\n\n"
+                    "New CAs from your channels won't be forwarded until "
+                    "tomorrow, or upgrade for a higher limit: /pricing",
+                    parse_mode='Markdown'
+                )
+            except Exception as e:
+                print(f"⚠️ Couldn't send limit notice to {user_id}: {e}")
+
+        try:
+            asyncio.get_running_loop().create_task(_send())
+        except RuntimeError:
+            pass  # no event loop in this thread — console warning still fired
+    
     async def handle_monitored_message(self, user_id: int, event):
         """Handle messages from monitored channels (called by SessionManager)"""
         try:
@@ -331,6 +371,16 @@ class MultiUserCABot:
             matching_routes = [r for r in routes if r['source_chat_id'] == event_chat_id]
 
             if not matching_routes:
+                chat_label = event_chat_id
+                try:
+                    chat_label = f"{event.chat.title or event.chat.username or event_chat_id}" if event.chat else event_chat_id
+                except Exception:
+                    pass
+                print(
+                    f"📭 msg {event.message.id} from '{chat_label}' ({event_chat_id}): no route "
+                    f"for user {user_id} (their routes cover: "
+                    f"{sorted({r['source_chat_id'] for r in routes})})"
+                )
                 return
 
             # Extract message text
@@ -343,6 +393,7 @@ class MultiUserCABot:
             client = self.session_manager.get_user_client(user_id)
 
             if not client:
+                print(f"⚠️ msg {event.message.id} for user {user_id}: no active client (session down?) — skipping")
                 return
 
             # Get user's format preference
@@ -355,10 +406,19 @@ class MultiUserCABot:
             # sources (buttons, hyperlinks, previews) that alert channels
             # use when they don't put the CA directly in the text
             ca, trading_link, ca_source_url = self._resolve_ca_and_link(event.message, message_text)
+
+            # Trace line: makes every matched message visible in the console so
+            # "nothing happened" cases can be diagnosed from the pane history
+            print(
+                f"📩 msg {event.message.id} chat {event_chat_id} -> user {user_id}: "
+                f"ca={ca or '—'} link={'yes' if trading_link else '—'} "
+                f"text_len={len(message_text)}"
+            )
             
             # Diagnostic: when a route matched but nothing was extracted,
-            # show what hidden sources exist so new channel formats can be
-            # identified from the console
+            # ALWAYS log it (with a text snippet) so un-mirrored posts are
+            # never silent and new channel formats can be identified from
+            # the console
             if not ca and not trading_link:
                 hidden = self.extract_hidden_urls(event.message)
                 btn_data = []
@@ -367,8 +427,11 @@ class MultiUserCABot:
                         d = getattr(btn, 'data', None)
                         if d:
                             btn_data.append(d.decode() if isinstance(d, (bytes, bytearray)) else str(d))
-                if hidden or btn_data:
-                    print(f"🔍 No CA/link for user {user_id} but hidden sources found: urls={hidden[:3]} btn_data={btn_data[:3]}")
+                snippet = message_text[:150].replace('\n', ' ')
+                print(
+                    f"🔍 Nothing extracted for user {user_id} (msg {event.message.id}): "
+                    f"text='{snippet}' urls={hidden[:3]} btn_data={btn_data[:3]}"
+                )
             
             url_hash = hashlib.sha256(trading_link.encode()).hexdigest() if trading_link else None
 
@@ -391,27 +454,30 @@ class MultiUserCABot:
                 # since B's own forward of the CA looks identical to a
                 # duplicate of A's forward once you drop route_id from the check.
                 ca_is_duplicate = bool(
-                    ca and self.db.ca_already_forwarded(user_id, ca, route_id=route_id, hours=24)
+                    ca and self.db.ca_already_forwarded(user_id, ca, route_id=route_id)
                 )
                 url_is_duplicate = bool(
-                    trading_link and self.db.url_already_forwarded(user_id, url_hash, route_id=route_id, hours=24)
+                    trading_link and self.db.url_already_forwarded(user_id, url_hash, route_id=route_id)
                 )
 
                 # Isolate each route — a bad target chat must not block the others
                 try:
+                    ca_forwarded = False
                     if ca:
                         if ca_is_duplicate:
                             print(f"🔄 Duplicate CA for user {user_id} on route {route_id}: {ca}")
                         elif not self.db.can_forward_ca(user_id):
                             print(f"⚠️ User {user_id} hit daily CA limit")
+                            self._notify_daily_limit(user_id)
                         else:
+                            # CA-only mode: even when the post also carries a
+                            # trading link, only the CA goes out — links are
+                            # never forwarded
                             if ca_format == 'minimal':
                                 await client.send_message(target_chat_id, ca)
                             else:
                                 ca_message = f"💎 *New CA Detected!*\n\n"
                                 ca_message += f"`{ca}`\n\n"
-                                if ca_source_url:
-                                    ca_message += f"🔗 {_escape_md(ca_source_url)}\n\n"
                                 ca_message += f"📥 From: {_escape_md(matching_route['source_name'])}\n"
                                 ca_message += f"👤 Posted by: {_escape_md(sender_name)}\n"
                                 ca_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
@@ -427,49 +493,17 @@ class MultiUserCABot:
                                 sender_name=sender_name
                             )
                             self.db.increment_daily_ca_count(user_id)
+                            ca_forwarded = True
                             forward_count += 1
                             logger.info(f"CA forwarded for user {user_id}: {ca[:20]}... to {matching_route['target_name']}")
 
+                    # CA-only mode: trading links are extracted (for dedupe/
+                    # analytics) but NEVER forwarded — only CAs go out.
                     if trading_link:
-                        # Suppress the separate link forward when it adds nothing:
-                        # the link is the same URL the CA was extracted from, or
-                        # the CA itself is embedded in the link. The CA message
-                        # already carries ca_source_url, so the info isn't lost.
-                        link_is_redundant = bool(
-                            ca and (
-                                (ca_source_url and trading_link == ca_source_url) or
-                                ca.lower() in trading_link.lower()
-                            )
-                        )
                         if url_is_duplicate:
                             print(f"🔄 Duplicate URL for user {user_id} on route {route_id}: {trading_link}")
-                        elif link_is_redundant:
-                            print(f"↩️ Skipping redundant link for user {user_id} on route {route_id} (already in CA message)")
-                        elif not self.db.can_forward_ca(user_id):
-                            print(f"⚠️ User {user_id} hit daily limit")
                         else:
-                            if ca_format == 'minimal':
-                                await client.send_message(target_chat_id, trading_link)
-                            else:
-                                url_message = f"🔗 *New Trading Link Detected!*\n\n"
-                                url_message += f"{trading_link}\n\n"
-                                url_message += f"📥 From: {_escape_md(matching_route['source_name'])}\n"
-                                url_message += f"👤 Posted by: {_escape_md(sender_name)}\n"
-                                url_message += f"⏰ {datetime.now().strftime('%H:%M:%S')}"
-                                await client.send_message(target_chat_id, url_message, parse_mode='md')
-
-                            self.db.log_forwarded_url(
-                                user_id=user_id,
-                                route_id=route_id,
-                                url=trading_link,
-                                url_hash=url_hash,
-                                source_chat_id=event_chat_id,
-                                source_message_id=event.message.id,
-                                sender_name=sender_name
-                            )
-                            self.db.increment_daily_ca_count(user_id)
-                            forward_count += 1
-                            logger.info(f"URL forwarded for user {user_id}: {trading_link} to {matching_route['target_name']}")
+                            print(f"↩️ Skipping link for user {user_id} on route {route_id} (CA-only mode: {trading_link[:60]})")
 
                 except Exception as route_err:
                     logger.error(
@@ -505,7 +539,7 @@ class MultiUserCABot:
         
         # Build welcome message
         message = f"👋 *Welcome to VultMirror*\n\n"
-        message += "💎 Monitor Solana calls from ANY channel\n"
+        message += "💎 Monitor CAs from ANY channel — Solana, EVM & more\n"
         message += "🚀 Forward CAs instantly to your group\n"
         message += "🔒 100% private - channels won't know\n\n"
         
@@ -765,7 +799,7 @@ class MultiUserCABot:
         
         # Build welcome message
         message = f"👋 *Welcome to CA Mirror Bot!*\n\n"
-        message += "💎 Monitor Solana calls from ANY channel\n"
+        message += "💎 Monitor CAs from ANY channel — Solana, EVM & more\n"
         message += "🚀 Forward CAs instantly to your group\n"
         message += "🔒 100% private - channels won't know\n\n"
         
@@ -1217,7 +1251,7 @@ class MultiUserCABot:
                             f"✅ *Route Added!*\n\n"
                             f"📊 Monitoring: {data['source_name']}\n"
                             f"📤 Forwarding to: {data['target_name']}\n\n"
-                            f"🎯 Bot is now watching for Solana CAs!",
+                            f"🎯 Bot is now watching for CAs (any chain)!",
                             parse_mode='Markdown'
                         )
                         del self.user_states[user_id]

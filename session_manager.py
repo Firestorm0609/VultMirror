@@ -6,6 +6,7 @@ Handles individual user Telethon sessions for monitoring
 
 import os
 import asyncio
+import sqlite3
 from typing import Dict, Optional
 from telethon import TelegramClient, events
 from telethon.errors import SessionPasswordNeededError, PhoneCodeInvalidError, FloodWaitError
@@ -25,6 +26,32 @@ class SessionManager:
         # Create sessions directory if not exists
         os.makedirs(self.session_dir, exist_ok=True)
     
+    @staticmethod
+    async def _dispose_client(client: Optional[TelegramClient]):
+        """
+        Fully disconnect a client AND close its session file.
+
+        Telethon keeps the .session SQLite file open for the lifetime of the
+        client object. disconnect() alone does not reliably close it, so a
+        dead/zombie client (e.g. after 'Server closed the connection') can
+        keep holding the file and make every later attempt on the same
+        session fail with 'database is locked'.
+        """
+        if client is None:
+            return
+        try:
+            if client.is_connected():
+                await client.disconnect()
+        except Exception:
+            pass
+        try:
+            # Close the underlying SQLite session store, releasing the lock
+            session = getattr(client, 'session', None)
+            if session is not None:
+                session.close()
+        except Exception:
+            pass
+    
     async def create_user_session(self, user_id: int, api_id: str, api_hash: str, 
                                   phone: str) -> tuple[bool, str]:
         """
@@ -38,11 +65,25 @@ class SessionManager:
             
             session_path = f"{self.session_dir}/user_{user_id}"
             
-            # Create client
-            client = TelegramClient(session_path, int(api_id), api_hash)
+            # Release any client that still holds this session file open,
+            # otherwise the new client hits 'database is locked'
+            await self._dispose_client(self.user_clients.pop(user_id, None))
             
-            # Connect
-            await client.connect()
+            # Connect with a few retries: transient errors like
+            # 'Server closed the connection' can leave the session file in a
+            # bad state, so start from a fresh client on each attempt
+            last_err: Optional[Exception] = None
+            for attempt in range(3):
+                client = TelegramClient(session_path, int(api_id), api_hash)
+                try:
+                    await client.connect()
+                    break
+                except Exception as e:
+                    last_err = e
+                    await self._dispose_client(client)
+                    if attempt == 2:
+                        raise
+                    await asyncio.sleep(2 * (attempt + 1))
             
             # Check if already authorized
             if await client.is_user_authorized():
@@ -68,6 +109,16 @@ class SessionManager:
             
         except FloodWaitError as e:
             return (False, f"Too many attempts. Please wait {e.seconds} seconds.")
+        except sqlite3.OperationalError as e:
+            if 'locked' in str(e).lower():
+                print(f"❌ Session db locked for user {user_id}: {e}")
+                traceback.print_exc()
+                return (False,
+                        "Login is temporarily blocked (session busy). "
+                        "Please try /start again in about a minute.")
+            print(f"❌ Database error creating session for user {user_id}: {e}")
+            traceback.print_exc()
+            return (False, f"Error: {str(e)}")
         except Exception as e:
             print(f"❌ Error creating session for user {user_id}: {e}")
             traceback.print_exc()
@@ -126,14 +177,11 @@ class SessionManager:
             # Get user info
             me = await client.get_me()
             
-            # Disconnect any existing client before replacing it to prevent
-            # ghost event handlers that would cause double-forwarding
+            # Dispose any existing client before replacing it to prevent
+            # ghost event handlers AND to release the old session file lock
             existing = self.user_clients.get(user_id)
             if existing and existing is not client:
-                try:
-                    await existing.disconnect()
-                except Exception:
-                    pass
+                await self._dispose_client(existing)
 
             # Store client and clean up pending auth
             self.user_clients[user_id] = client
@@ -159,10 +207,12 @@ class SessionManager:
         
         @client.on(events.NewMessage(incoming=True))
         async def user_message_handler(event):
-            # Skip private messages
-            if event.is_private:
-                return
-            
+            # Private chats are valid sources: a route may point at a DM
+            # (e.g. a callout bot's alerts -> an exec bot), and there is no
+            # way to do that if DMs are dropped here. Route matching in
+            # handle_monitored_message already filters on source_chat_id, so
+            # any DM that no route names is ignored there instead.
+            #
             # Pass to main message handler with user_id
             await self.message_handler(user_id, event)
         
@@ -178,6 +228,10 @@ class SessionManager:
 
             api_id, api_hash, phone = credentials
             session_path = f"{self.session_dir}/user_{user_id}"
+
+            # Release any client that already holds this session file so the
+            # new one doesn't hit 'database is locked'
+            await self._dispose_client(self.user_clients.pop(user_id, None))
 
             # Check if session file exists
             if not os.path.exists(f"{session_path}.session"):
@@ -318,18 +372,19 @@ class SessionManager:
             client = None
             try:
                 client = self.pending_auth[user_id].get('client')
-                if client and client.is_connected():
-                    await client.disconnect()
+                # Dispose fully so the session file lock is released even if
+                # the client already died (e.g. 'Server closed the connection')
+                await self._dispose_client(client)
             except Exception:
                 pass
             finally:
-                del self.pending_auth[user_id]
+                self.pending_auth.pop(user_id, None)
     
     async def disconnect_user(self, user_id: int):
         """Disconnect a user's client"""
         if user_id in self.user_clients:
             try:
-                await self.user_clients[user_id].disconnect()
+                await self._dispose_client(self.user_clients[user_id])
                 del self.user_clients[user_id]
                 print(f"✅ Disconnected user {user_id}")
             except Exception as e:
